@@ -46,15 +46,27 @@ Community and Enterprise · Any Odoo version · GitHub sync · Live metrics · F
 
 ## Quick start
 
-On a Linux server (Ubuntu or Debian), one command installs Docker if needed and then Sudoo.sh:
+On a Linux server (Ubuntu 22.04+ or Debian 12+), one command checks the server, installs what is missing (Docker,
+after asking) and starts Sudoo.sh from its prebuilt images:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sudoo-sh/sudoo.sh/main/get.sh | sudo bash
+curl -fsSL https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh | sudo bash
+```
+
+To read the installer before running it, download it with the release's checksums, check it, and run it:
+
+```bash
+curl -fsSLO https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh
+curl -fsSLO https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS      # must print: sudoo-install.sh: OK
+less sudoo-install.sh                              # read it
+sudo bash sudoo-install.sh
 ```
 
 It prints the panel's link and a **setup code**. Open the link, enter the code, and create your own account with
 your name, e-mail and password; you sign in with your e-mail address. Everything else, including the e-mail account that sends sign-in codes, is set up
-in the website. Details in [Installation & Configuration](#installation--configuration).
+in the website. Without the installer: [Manual installation](#manual-installation). Details in
+[Installation & Configuration](#installation--configuration).
 
 ## Sudoo.sh and Odoo.sh
 
@@ -205,11 +217,9 @@ Details, and what is deliberately *not* protected, are in [Security](docs/SECURI
 ```
 sudoo.sh/
 ├── README.md, LICENSE.md, CHANGELOG.md, CONTRIBUTING.md, SECURITY.md
-├── get.sh                         # one-command install: Docker if needed, the latest release, install.sh
-├── install.sh                     # installs or updates the panel on the server (run as root)
-├── check-server.sh                # read-only check of the server: Docker, memory, disk, internet access
 ├── pyproject.toml, uv.lock        # dependencies (locked with uv), plugins, tool settings
-├── Dockerfile, compose.yaml       # the backend container (sudoo-panel) and the web app (sudoo-web)
+├── Dockerfile, compose.yaml       # the backend image (sudoo-panel, with docs/ inside) and the web app (sudoo-web)
+├── .github/workflows/             # CI; images.yml builds, signs and publishes the images (release.yml, edge from main)
 ├── web/                           # the web app: React + TypeScript + Vite, served by Caddy
 │   ├── src/api/                   #   typed calls to /api/v1, query hooks, the live event stream
 │   ├── src/styles/                #   SCSS: _tokens.scss (colours, sizes, motion), components, layout, pages
@@ -275,20 +285,68 @@ sudoo.sh/
 
 ## Installation & Configuration
 
-Requirements: a Linux server (Ubuntu or Debian recommended), at least 2 GB of memory (about 1 to 1.5 GB per running
-instance), 20 GB of free disk, and outgoing internet access to GitHub, Docker Hub and Cloudflare. With the default
-exposure plugin no incoming port is needed. Docker is installed for you if it is missing.
+Requirements: a Linux server (Ubuntu 22.04+ or Debian 12+; amd64 or arm64) with systemd, 2 CPU cores, at least 2 GB
+of memory (about 1 to 1.5 GB per running instance), 20 GB of free disk, and outgoing HTTPS to GitHub, ghcr.io, Docker
+Hub and Cloudflare. With the default exposure plugin no incoming port is needed.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sudoo-sh/sudoo.sh/main/get.sh | sudo bash
+curl -fsSL https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh | sudo bash
 ```
 
-The same command updates an installed panel to the latest release; instances, accounts, keys and settings are kept,
-and the public links do not change. A specific version: `SUDOO_VERSION=v1.0.0`. From a copy of the repository,
-`sudo ./check-server.sh` (a read-only check) and `sudo ./install.sh` do the same.
+The installer checks the server first and prints every problem with its fix; it installs nothing without asking
+(**[y]es**, **[n]o** or **[a]ll**; `--yes` answers yes for scripts). It downloads the two prebuilt, signed images of the
+release (`ghcr.io/sudoo-sh/sudoo-panel` and `sudoo-web`, pinned by digest), writes `/opt/odoo/manager/.env` and
+`compose.yaml`, and starts them. It stays on the server as `sudoo-install`:
+
+| Command | What it does |
+| :--- | :--- |
+| `sudo sudoo-install check` | Checks the server; changes nothing. |
+| `sudo sudoo-install update` | Updates to the latest release. Only `sudoo-panel` and `sudoo-web` are replaced; instances, accounts, keys, settings and the public links are kept. |
+| `sudo sudoo-install update --rollback` | Goes back to the version that ran before the last update. |
+| `sudo sudoo-install update --version edge` | Follows `main` (images built from every commit), for test servers. |
+| `sudo sudoo-install status` | Version, containers, links. |
+| `sudo sudoo-install uninstall` | Removes the panel; `/opt/odoo` and the instances' data are kept (`--purge` deletes everything). |
+
+A server installed with the earlier `install.sh` is moved to the images by the same `update`, with the same
+containers, folders and settings. Everything about installing: [Administrator guide](docs/ADMIN_GUIDE.md#2-installing).
 
 The installer prints the panel's link and, on a new server, a **setup code**: open the link, enter the code and create
 the first account (a super admin). Show the code again with `docker exec sudoo-panel sudoo.sh setup-code`.
+
+### Manual installation
+
+Without the installer, with Docker Engine 24+ and its Compose plugin already installed:
+
+```bash
+sudo install -d -m 700 /opt/odoo /opt/odoo/manager /opt/odoo/instances /opt/odoo/enterprise
+cd /opt/odoo/manager
+sudo curl -fsSLO https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/compose.yaml
+sudo curl -fsSL -o .env https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/env.example
+sudo chmod 600 .env compose.yaml                  # then edit .env if needed (docs/CONFIGURATION.md)
+sudo docker compose pull && sudo docker compose up -d
+sudo docker exec sudoo-panel sudoo.sh urls        # the panel's link
+sudo docker exec sudoo-panel sudoo.sh setup-code  # the code for the first account
+```
+
+The release's `compose.yaml` names the images by digest. To update by hand, download the new release's
+`compose.yaml`, add the new keys of its `env.example` to `.env`, and run `sudo docker compose pull && sudo docker
+compose up -d` again in `/opt/odoo/manager`.
+
+### From source (developers)
+
+The repository's `compose.yaml` builds the two images from the source (`sudoo-panel:local`, `sudoo-web:local`):
+
+```bash
+git clone https://github.com/Sudoo-sh/sudoo.sh.git && cd sudoo.sh
+sudo install -d -m 700 /opt/odoo /opt/odoo/manager /opt/odoo/instances /opt/odoo/enterprise
+[ -f /opt/odoo/manager/.env ] || sudo install -m 600 .env.example /opt/odoo/manager/.env
+sudo ln -sfn /opt/odoo/manager/.env .env           # the same settings for the clone
+sudo docker compose build
+sudo docker compose up -d manager web
+```
+
+Run `git pull` and the last two commands again to update. This replaces only `sudoo-panel` and `sudoo-web`, like the
+installer; to go back to the released images, run `sudo sudoo-install update` (or the manual steps above).
 
 Almost every setting can be changed in the website (**Settings**). The base values are in `/opt/odoo/manager/.env`;
 the ones most people change:

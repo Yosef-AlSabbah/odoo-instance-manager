@@ -242,7 +242,7 @@ wildcard-domain = "my_exposure.wildcard:WildcardDomain"
 ```
 
 Install it into the panel's environment, for example by adding it to `pyproject.toml` of the panel and running
-`uv lock`, then set `EXPOSURE=wildcard-domain` and run `install.sh`.
+`uv lock`, build the images from that source (README, "From source"), then set `EXPOSURE=wildcard-domain`.
 
 `client_ip_header` names a request header that carries the visitor's real address and that only the service in
 front can set (the built-in `cloudflare-quick` uses Cloudflare's `CF-Connecting-IP`; `host-ports` uses `None`). The

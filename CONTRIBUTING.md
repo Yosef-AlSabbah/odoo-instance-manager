@@ -42,8 +42,9 @@ The web app needs a running backend: on a server through an SSH tunnel
 (`ssh -L 9002:127.0.0.1:9002 -L 9001:127.0.0.1:9001 <server>`), or locally with `uv run sudoo.sh serve` and the
 settings of your choice. How the interface is built and how to change its look: [docs/DESIGN.md](docs/DESIGN.md).
 
-To try a change on a server: `sudo ./check-server.sh`, then `sudo ./install.sh` from your working copy. Running
-`install.sh` again updates the panel and keeps instances, accounts, keys and settings. Settings are described in
+To try a change on a server, build and start the two images from your working copy (README, "From source"):
+`sudo docker compose build && sudo docker compose up -d manager web`. Only `sudoo-panel` and `sudoo-web` are
+replaced; instances, accounts, keys and settings are kept. Settings are described in
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md) and the template [.env.example](.env.example).
 
 ### Checks to run before you push

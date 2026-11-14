@@ -305,8 +305,9 @@ Each decision lists what we chose, why, what it costs, and the alternatives we c
   a new set, without touching the checks.
 
 ### One command to install
-- **Chosen:** `get.sh` installs Docker with Docker's own installer if needed, downloads the latest release and runs
-  `install.sh`, which prints the address and the setup code.
+- **Chosen:** one file per release, `sudoo-install.sh`, checks the server, installs what is missing after asking,
+  and starts prebuilt, signed images pinned by digest; it prints the address and the setup code. The images are built
+  by GitHub Actions for amd64 and arm64, so servers never build or download the source code.
 - **Why:** the person installing a demo server is often not a system administrator. Everything else, including
   e-mail, happens in the website.
 

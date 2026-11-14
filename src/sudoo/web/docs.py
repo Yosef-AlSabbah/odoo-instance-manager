@@ -1,6 +1,6 @@
 """The documentation inside the panel: the repository's README.md and docs/**/*.md, the same files as on GitHub.
 
-The installer copies the Markdown files into the image (settings.docs_dir), so the panel always shows the
+The image build copies the Markdown files into the image (settings.docs_dir), so the panel always shows the
 documentation of the version that is running. The web app shows them on its Help pages (/help/<path>), with the
 HTML rendered here (GET /api/v1/docs/<path>, web/v1/docs.py). Pages are addressed by their path in the repository:
 

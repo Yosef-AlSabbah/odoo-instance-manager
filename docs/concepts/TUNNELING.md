@@ -97,7 +97,7 @@ out a new random name, such as `river-stone-apple`. Nothing ties the name to us,
 | Event | Panel link | Instance links |
 | :--- | :--- | :--- |
 | An instance is paused, restarted or updated | same | same (its connector keeps running) |
-| The panel is updated (`install.sh`) | same, unless its connector restarts | same |
+| The panel is updated (`sudoo-install update`) | same, unless its connector restarts | same |
 | The server restarts | **new** | **new** |
 
 The panel always shows the current links, and each Odoo is told its new address within about 15 seconds. Links you

@@ -1,7 +1,7 @@
 # Administrator Guide
 
 **Audience:** the person responsible for the server and the panel.
-**Covers:** installing and updating, the first account, settings, e-mail, links, files and containers, Enterprise
+**Covers:** installing, updating, rolling back and uninstalling, the first account, settings, e-mail, links, files and containers, Enterprise
 add-ons, backups, daily backups and restores, the command line, checks and troubleshooting.
 **You need:** SSH access to the server as root (or with `sudo`).
 
@@ -12,7 +12,7 @@ add-ons, backups, daily backups and restores, the command line, checks and troub
 1. [The server](#1-the-server)
 2. [Installing](#2-installing)
 3. [The first account](#3-the-first-account)
-4. [Updating](#4-updating)
+4. [Updating, rolling back, uninstalling](#4-updating-rolling-back-uninstalling)
 5. [Settings](#5-settings)
 6. [E-mail](#6-e-mail)
 7. [Public links](#7-public-links)
@@ -30,69 +30,95 @@ add-ons, backups, daily backups and restores, the command line, checks and troub
 
 | Need | Why |
 | :--- | :--- |
-| Linux, Ubuntu or Debian recommended | Every part runs in Docker containers ([Docker](concepts/DOCKER.md)). Docker Engine and the Compose plugin are installed by the installer when missing. |
-| 2 GB of memory or more; about 1 to 1.5 GB per running instance | Odoo and PostgreSQL. Paused instances use none. |
-| 20 GB of free disk recommended (the installer stops below 5 GB) | Odoo images (about 1.5 GB per version), databases, attachments, backups. |
-| Outgoing access to GitHub (443 and 22), Docker Hub and Cloudflare (443, 7844) | Code, images, public links. |
+| Ubuntu 22.04+ or Debian 12+ (others may work, with a warning), amd64 or arm64, booted with systemd | Every part runs in Docker containers ([Docker](concepts/DOCKER.md)); the images exist for both architectures. |
+| 2 CPU cores, 2 GB of memory or more (4 GB recommended); about 1 to 1.5 GB per running instance | Odoo and PostgreSQL. Paused instances use none. |
+| 20 GB of free disk on `/opt` and on Docker's folder (`/var/lib/docker`) | Odoo images (about 1.5 GB per version), databases, attachments, backups. |
+| Docker Engine 24+ with the Compose v2 plugin (the installer installs them after asking) | The panel and every instance are Compose projects. |
+| Outgoing HTTPS to github.com, ghcr.io, registry-1.docker.io and Cloudflare (443, 7844); GitHub SSH (22) for private repositories | Releases and code, the Sudoo.sh images, the Odoo images, public links. |
 | **No incoming port** | Public access goes through connections the server opens itself ([Tunneling](concepts/TUNNELING.md)). Only SSH is needed, for administration. |
 
-`check-server.sh` (in the kit, see below) checks all of this and changes nothing:
+The installer checks all of this before it changes anything. To only check (changes nothing):
 
 ```bash
-sudo /opt/sudoo.sh-kit/check-server.sh
+curl -fsSL https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh | sudo bash -s -- check
 ```
 
-It prints one line per check, marked `[ OK ]`, `[WARN]` or `[FAIL]`, with a `Fix:` line saying what to do. If Docker
-Compose is missing on Ubuntu with the `docker.io` package, install `docker-compose-v2`.
+Each line is marked ✓ (fine), ! (a warning) or ✗ (must be fixed), and every problem has a `Fix:` line;
+[section 13](#installer-checks) lists them all.
 
 ---
 
 ## 2. Installing
 
-On a fresh server, one command installs everything:
+On a fresh server, one command does everything:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sudoo-sh/sudoo.sh/main/get.sh | sudo bash
+curl -fsSL https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh | sudo bash
 ```
 
-What `get.sh` does, in order:
-
-1. **Docker.** If Docker or its Compose plugin is missing, installs them with Docker's official installer
-   (`get.docker.com`) and starts Docker.
-2. **Checking the server.** Prints the memory and the free disk, and stops when less than 5 GB of disk is free.
-3. **Downloading.** Downloads the latest release of Sudoo.sh into `/opt/sudoo.sh-kit` (replacing an earlier copy).
-   Choose another version with `SUDOO_VERSION`:
-
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/Sudoo-sh/sudoo.sh/main/get.sh | sudo SUDOO_VERSION=v1.0.0 bash
-   curl -fsSL https://raw.githubusercontent.com/Sudoo-sh/sudoo.sh/main/get.sh | sudo SUDOO_VERSION=main bash
-   ```
-
-4. **Installing.** Runs `install.sh` from the downloaded kit.
-
-What `install.sh` does, in order:
-
-1. Creates `/opt/odoo/{manager,instances,enterprise}` (root only).
-2. Replaces the panel's code in `/opt/odoo/manager` (`src/`, `web/` and the build files) and copies the
-   documentation to `/opt/odoo/manager/documentation/`.
-3. Writes `/opt/odoo/manager/.env` from `.env.example`: new settings are added with their defaults, and **every
-   value already set on this server is kept**.
-4. Builds the two images and starts the containers `sudoo-panel` (the backend) and `sudoo-web` (the web app, on
-   the panel's port).
-5. Waits for the panel's public address and prints it.
-6. On a new server, prints the **setup code** for the first account ([section 3](#3-the-first-account)). On a server
-   that already has accounts, it says that accounts were not changed.
-
-You can also install from a copy of the kit (a release archive or a clone of the repository) without `get.sh`:
+`sudoo-install.sh` is one file attached to every release; nothing else is downloaded except the release's images. To
+read it before running it:
 
 ```bash
-scp -r sudoo.sh <user>@<server>:~
-ssh <user>@<server>
-cd ~/sudoo.sh
-sudo ./install.sh
+curl -fsSLO https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh
+curl -fsSLO https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS      # must print: sudoo-install.sh: OK
+less sudoo-install.sh
+sudo bash sudoo-install.sh
 ```
 
-`install.sh` expects Docker with the Compose plugin to be installed already.
+What it does, in order:
+
+1. **Checks the server** (read only): root, operating system, architecture, systemd, processor, memory, disk, clock,
+   the panel's ports, the tools it needs, internet access, Docker. When a check fails it stops, with the fix, before
+   changing anything.
+2. **Installs what is missing, after asking**: curl, openssl, ca-certificates, Docker Engine (from Docker's
+   repository, or the distribution's packages when Docker has none for this release), the Compose and buildx
+   plugins, starting Docker. Each question is answered **[y]es**, **[n]o** or **[a]ll** (yes to every later question).
+   Without a terminal it stops and prints the command to run again with `--yes` (also `--allow-all`).
+3. **Downloads the images** `ghcr.io/sudoo-sh/sudoo-panel` and `ghcr.io/sudoo-sh/sudoo-web`, pinned by digest in the
+   installer, and checks their signatures when `cosign` is installed ([Security](SECURITY.md#11-releases-and-signatures)).
+4. **Writes the files**: `/opt/odoo/{manager,instances,enterprise}` (root only), `/opt/odoo/manager/.env` from the
+   release's settings template (values already there are kept), and `/opt/odoo/manager/compose.yaml`.
+5. **Starts** `sudoo-panel` and `sudoo-web` and waits until both are healthy.
+6. Prints the panel's link and, on a new server, the **setup code** for the first account ([section 3](#3-the-first-account)).
+
+It keeps a copy of itself as `/opt/odoo/manager/installer/sudoo-install.sh`, on the path as **`sudoo-install`**.
+
+| Option | Meaning |
+| :--- | :--- |
+| `--version 1.0.0` | Install that release instead of the latest. `edge` follows `main` ([section 4](#following-main-edge)). |
+| `--yes`, `--allow-all` | Answer yes to every question (for scripts). |
+| `--dry-run` | Show what would be done; change nothing. |
+| `--docker-source official` or `distro` | Where a missing Docker comes from. |
+| `--force` | Continue although a check failed (not recommended). |
+
+Settings you want from the start (another `PANEL_PORT`, `EXPOSURE=host-ports`...) can be written to
+`/opt/odoo/manager/.env` before installing; the installer keeps them and adds the rest.
+
+### Manual installation
+
+Without the installer, on a server with Docker Engine 24+ and the Compose plugin:
+
+```bash
+sudo install -d -m 700 /opt/odoo /opt/odoo/manager /opt/odoo/instances /opt/odoo/enterprise
+cd /opt/odoo/manager
+sudo curl -fsSLO https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/compose.yaml
+sudo curl -fsSL -o .env https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/env.example
+sudo chmod 600 .env compose.yaml          # edit .env now if needed (CONFIGURATION.md)
+sudo docker compose pull
+sudo docker compose up -d
+sudo docker exec sudoo-panel sudoo.sh urls
+sudo docker exec sudoo-panel sudoo.sh setup-code
+```
+
+The release's `compose.yaml` names both images by digest. `SHA256SUMS` of the same release covers `compose.yaml` and
+`env.example`.
+
+### From source
+
+For developers, from a clone of the repository: the README's "From source" section builds the two images with
+`docker compose build` and starts them with the same container names, folders and settings.
 
 ---
 
@@ -125,28 +151,79 @@ Keep the setup code private until the first account exists: whoever uses it firs
 
 ---
 
-## 4. Updating
-
-Run the same command again:
+## 4. Updating, rolling back, uninstalling
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sudoo-sh/sudoo.sh/main/get.sh | sudo bash
+sudo sudoo-install update
 ```
 
-or copy a new kit to the server and run `sudo ./install.sh` in it.
+(or, on a server without the `sudoo-install` command, the install command with `-s -- update`). It runs the checks,
+downloads the latest release's installer and checks it against that release's `SHA256SUMS`, then:
+
+1. backs up `/opt/odoo/manager` to `/opt/odoo/manager-backup-<date>.tgz`;
+2. keeps the running images under a name, for a rollback;
+3. adds the new settings to `.env` with their defaults (every value already set is kept) and writes the new
+   `compose.yaml`;
+4. recreates **only `sudoo-panel` and `sudoo-web`**, waits until both are healthy, and checks that every instance
+   and connector container is still the same container with the same start time.
 
 | Kept | Replaced or restarted |
 | :--- | :--- |
-| Instances, their databases, files and links | The panel's code, web app and documentation |
-| Accounts, API tokens, audit log (`sudoo.db`) | `sudoo-panel` and `sudoo-web` are rebuilt and restarted (a few seconds) |
-| Deploy keys, the vault key, the secret key | New settings are added to `.env` with their defaults |
+| Instances, their databases, files and links | `sudoo-panel` and `sudoo-web` (a few seconds) |
+| The connector containers, so every public link stays the same | `compose.yaml`; new settings in `.env` |
+| Accounts, API tokens, audit log (`sudoo.db`), deploy keys, vault key, secret key | |
 | Settings in `.env` and `settings.json` | |
-| The connector containers, so every public link stays the same | |
 
-Running instances are not restarted. Accounts of earlier versions are renamed once: "admin" accounts become
-**Super admin**, "sync operator" accounts become **Developer**.
+Running instances are not restarted. Read the release notes before updating to a new major version. A specific
+version: `sudo sudoo-install update --version 1.2.0`.
 
-Read `CHANGELOG.md` in the kit before updating to a new major version.
+### Rolling back
+
+```bash
+sudo sudoo-install update --rollback
+```
+
+Puts back the images and `compose.yaml` of the version that ran before the last update (the `.env` stays). Running it
+again switches forward. The backup of `/opt/odoo/manager` taken by the update is there if data must go back too.
+
+### Following main (edge)
+
+Every commit on `main` that passes the checks publishes images tagged `edge` and `sha-<commit>`. A test server can
+follow them:
+
+```bash
+sudo sudoo-install update --version edge
+```
+
+The images are pinned to their digest at that moment, with the `compose.yaml` and `.env.example` of the same commit.
+Later `sudo sudoo-install update` runs keep following `edge`; `--version 1.2.0` goes back to releases.
+
+### Servers installed with the earlier install.sh
+
+Servers installed by the earlier `get.sh` / `install.sh` (images built on the server, the kit in
+`/opt/sudoo.sh-kit`) update with the same command. The containers keep their names, `/opt/odoo` and `.env` stay, the
+connectors and instances are not touched. The source files in `/opt/odoo/manager` and `/opt/sudoo.sh-kit` are removed
+afterwards (they are in the backup), and the images built on the server are kept for `update --rollback`.
+
+### Updating by hand
+
+For a [manual installation](#manual-installation): download the new release's `compose.yaml` into
+`/opt/odoo/manager`, add the new keys of its `env.example` to `.env`, then
+`sudo docker compose pull && sudo docker compose up -d` there. `docker compose` only recreates `sudoo-panel` and
+`sudoo-web`; never use `--remove-orphans` or restart the connectors.
+
+### Uninstalling
+
+```bash
+sudo sudoo-install uninstall
+```
+
+Removes `sudoo-panel`, `sudoo-web`, their images, the Cloudflare connectors (the public links stop working) and the
+`sudoo-install` command, and stops the instances. `/opt/odoo` (settings, accounts, keys, backups) and the instances'
+databases and files are kept; installing again brings them back, with new links.
+
+`sudo sudoo-install uninstall --purge` also deletes every instance with its volumes and all of `/opt/odoo`. It asks you
+to type `DELETE` (`--yes` does not answer it). Docker stays installed.
 
 ---
 
@@ -292,10 +369,12 @@ Do not restart or recreate the connector containers by hand: their links would c
 ### Files and folders
 
 ```
-/opt/sudoo.sh-kit/                           the downloaded kit (get.sh); install.sh and check-server.sh are here
 /opt/odoo/                                   root only
 ├── manager/
 │   ├── .env                                 settings (mode 600)
+│   ├── compose.yaml                         sudoo-panel and sudoo-web, images pinned (written by the installer)
+│   ├── installer/                           sudoo-install.sh (the sudoo-install command), the running and the
+│   │                                        previous version (release, previous-release)
 │   ├── settings.json                        settings changed on the Settings page, on top of .env;
 │   │                                        passwords in it are ENCRYPTED
 │   ├── sudoo.db                             SQLite: accounts (password HASHES), second factors, API tokens,
@@ -306,10 +385,9 @@ Do not restart or recreate the connector containers by hand: their links would c
 │   ├── keys/deploy/<owner>__<repo>.key      deploy key, ENCRYPTED (mode 600)
 │   ├── keys/deploy/<owner>__<repo>.pub      its public part (what is added on GitHub)
 │   ├── keys/deploy/<owner>__<repo>.name     the repository name as written on GitHub
-│   ├── documentation/                       README.md and docs/, shown under Help in the panel
-│   ├── src/, pyproject.toml, uv.lock        the backend's code (from the kit)
-│   ├── web/                                 the web app's code and Caddyfile (from the kit)
-│   └── Dockerfile, compose.yaml, .env.example, README.md, LICENSE.md
+│   └── documentation, code                  none: they are inside the images (the documentation of the running
+│                                            version is in sudoo-panel under /app/documentation)
+├── manager-backup-<date>.tgz                /opt/odoo/manager before an update or rollback (mode 600)
 ├── enterprise/<version>/                    Enterprise add-ons (folder source, default ENTERPRISE_PATH)
 ├── enterprise-git/<version>/                Enterprise add-ons downloaded by the git source
 ├── backups/                                 Odoo-format backup zips (mode 600)
@@ -516,11 +594,11 @@ Back up `/opt/odoo/manager`. The parts that cannot be recreated:
 | `sudoo.db` | Accounts, second factors, API tokens, audit log, instance state | Every account and token must be created again. |
 | `vault.key` | The key of every encrypted secret | Encrypted deploy keys, master passwords and passwords in `settings.json` cannot be read; account passwords must be reset. |
 | `settings.json` | Settings changed in the browser | The `.env` values apply. |
-| `.env` | The base settings | `install.sh` writes the defaults. |
+| `.env` | The base settings | The installer writes the defaults. |
 | `secret_key` | Signs session cookies | A new one is made; everyone signs in again. |
 | `keys/` | Deploy keys (encrypted) | Deploy keys must be created and added on GitHub again. |
 
-`src/`, `web/` and `documentation/` come with the kit and need no backup.
+`compose.yaml` and `installer/` are written again by the installer; the code and the documentation are in the images.
 
 **The vault key** deserves its own place:
 
@@ -586,7 +664,7 @@ After installing or updating:
 | :--- | :--- | :--- |
 | The panel's link does not open | The link changed after a restart | `docker exec sudoo-panel sudoo.sh urls` |
 | No link at all | `sudoo-panel` or the connector is not running | `docker ps -a`, `docker logs sudoo-panel`, then `cd /opt/odoo/manager && docker compose up -d` |
-| The link opens but shows an error, or nothing | `sudoo-web` is not running or not starting | `docker logs sudoo-web`, then `cd /opt/odoo/manager && docker compose up -d --build` |
+| The link opens but shows an error, or nothing | `sudoo-web` is not running or not starting | `docker logs sudoo-web`, then `cd /opt/odoo/manager && docker compose up -d` |
 | `sudoo-panel` keeps restarting | A wrong value in `.env`, or an unknown plugin name | `docker logs sudoo-panel` names the setting; fix it in `.env` and run `docker compose up -d` in `/opt/odoo/manager` |
 | The setup code was lost | It is only printed once by the installer | `docker exec sudoo-panel sudoo.sh setup-code` |
 | The setup page refuses even the right code | 5 wrong setup codes within 15 minutes blocked the address | Wait 15 minutes; check the code with `sudoo.sh setup-code` |
@@ -613,6 +691,41 @@ After installing or updating:
 | Deletion failed: "the database did not start, so no backup could be taken" | The instance's database container is broken | Nothing was deleted. Check `docker logs odoo-<name>-db-1`; to delete anyway, fix or remove the database by hand |
 | JSON-2 API: 401 with a valid key | Odoo 20 API key without an expiry date | Create the key with an expiry date ([API](API.md)) |
 | Requests over 100 MB, or over 100 seconds, fail | Cloudflare quick tunnel limits | Split uploads; run long operations in the background |
+
+
+### Installer checks
+
+Every check the installer runs, what a failure means and what to do. A ✗ stops the installer before it changes
+anything; a ! is a warning. `sudo sudoo-install check` runs them all without changing anything.
+
+| Check | ✗ or ! means | Fix |
+| :--- | :--- | :--- |
+| Running as root | It was run without `sudo` | Run it with `sudo` (`... \| sudo bash`) |
+| Operating system | ✗ Ubuntu older than 22.04 or Debian older than 12; ! another distribution (not tested) | `sudo do-release-upgrade` (Ubuntu) or upgrade Debian; elsewhere it may work |
+| Architecture | Not amd64 (x86_64) or arm64 | Use an x86_64 or arm64 server |
+| Service manager: systemd | The system does not boot with systemd (a container, WSL) | Use a server or VM with Ubuntu or Debian |
+| Processor | Fewer than 2 cores | A server with 2 or more cores |
+| Memory | ✗ under 2 GB; ! under 4 GB | A bigger server; at least add a swap file (`fallocate -l 2G /swapfile`, `mkswap`, `swapon`) |
+| Free disk for /opt and /var/lib/docker | Under 20 GB free (5 GB for an update) | Free space (`docker system df`, `docker image prune`) or enlarge the disk |
+| Clock | ! The clock is not synchronised | `sudo timedatectl set-ntp true` |
+| Port ... is free | Another program listens on `PANEL_PORT`, `API_PORT` or `EVENTS_PORT` | `sudo ss -ltnp 'sport = :9000'` shows it; stop it, or set another port in `/opt/odoo/manager/.env` and run the installer again |
+| Tools | curl, tar, openssl or ca-certificates is missing | Answer yes when asked, or `sudo apt-get install -y curl openssl ca-certificates` |
+| HTTPS to github.com, ghcr.io, registry-1.docker.io, download.docker.com, api.trycloudflare.com | No connection | Allow outgoing TCP 443; check DNS (`getent hosts ghcr.io`) and any proxy (`HTTPS_PROXY`, and Docker's own proxy settings) |
+| Cloudflare tunnel port 7844 | ! Outgoing 7844 is blocked | Allow outgoing TCP and UDP 7844 to `*.argotunnel.com` |
+| Docker Engine | Missing, from a snap, not running, or older than 24 | Answer yes to install or start it; a snap: `sudo snap remove docker`, then run again; old: upgrade from Docker's repository |
+| Docker Compose | The Compose v2 plugin is missing | Answer yes, or `sudo apt-get install -y docker-compose-plugin` (Ubuntu's `docker.io`: `docker-compose-v2`) |
+| Docker buildx | ! Missing (only needed to build images yourself) | `sudo apt-get install -y docker-buildx-plugin` (or `docker-buildx`) |
+| Control groups | ! cgroup v1 | Boot with cgroup v2 (`systemd.unified_cgroup_hierarchy=1`), the default on Ubuntu 22.04+ and Debian 12+ |
+| Docker starts after a reboot | ! Not enabled | `sudo systemctl enable docker` |
+
+| Message after the checks | What to do |
+| :--- | :--- |
+| "There is no terminal to ask, so nothing was changed." | Run the printed command (the same, with `--yes`). |
+| "Could not download ghcr.io/sudoo-sh/..." | Check access to `ghcr.io`; `docker pull` the image by hand to see Docker's message. |
+| "The signature of ... could not be verified" | Do not install it; report it ([Security](SECURITY.md#11-releases-and-signatures)). |
+| "Sudoo.sh did not become healthy." | `docker logs sudoo-panel` names the problem (usually `.env`); fix it and run `sudo sudoo-install update`, or go back with `sudo sudoo-install update --rollback`. |
+| "These containers changed meanwhile" | The installer does not touch instances or connectors; the panel itself may have started or paused an instance. Check `docker ps`. |
+| "No earlier version is kept on this server." | A rollback needs an update made by this installer; install a given version with `update --version X`. |
 
 ---
 

@@ -1,0 +1,116 @@
+name: Release
+
+# Pushing a tag v1.2.3 (or v1.2.3-rc.1) publishes the two images for linux/amd64 and linux/arm64, signed, and creates
+# a draft GitHub release with compose.yaml pinned to the images' digests (for manual installs), env.example and
+# SHA256SUMS. The installer (sudoo-install.sh) is checked and attached from its own repository, which then publishes
+# the release; see docs/ADMIN_GUIDE.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      stable: ${{ steps.version.outputs.stable }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: The tag must be a version, equal to pyproject.toml's
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::$GITHUB_REF_NAME is not a version tag (v1.2.3 or v1.2.3-rc.1)"; exit 1
+          fi
+          project=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -n1)
+          if [ "$project" != "$version" ]; then
+            echo "::error::pyproject.toml says $project, the tag says $version: set the version, then tag again"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then echo "stable=false" >> "$GITHUB_OUTPUT"; else echo "stable=true" >> "$GITHUB_OUTPUT"; fi
+
+  images:
+    name: Images
+    needs: version
+    uses: ./.github/workflows/images.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      # 1.2.3 always; 1.2, 1 and latest for stable versions only
+      tags: |
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}},enable=${{ needs.version.outputs.stable }}
+        type=semver,pattern={{major}},enable=${{ needs.version.outputs.stable }}
+        type=raw,value=latest,enable=${{ needs.version.outputs.stable }}
+
+  release:
+    name: Draft release
+    needs: [version, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release
+      id-token: write   # sign compose.yaml
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PANEL: ghcr.io/sudoo-sh/sudoo-panel@${{ needs.images.outputs.panel-digest }}
+      WEB: ghcr.io/sudoo-sh/sudoo-web@${{ needs.images.outputs.web-digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: compose.yaml pinned to the digests, without the build lines
+        run: |
+          mkdir dist
+          sed -E \
+            -e "s#^(    image: )\\$\\{SUDOO_PANEL_IMAGE:-[^}]*\\}\$#\\1$PANEL#" \
+            -e "s#^(    image: )\\$\\{SUDOO_WEB_IMAGE:-[^}]*\\}\$#\\1$WEB#" \
+            -e '/^    build: /d' compose.yaml > dist/compose.yaml
+          [ "$(grep -c '^    image: ghcr.io/sudoo-sh/sudoo-[a-z]*@sha256:[0-9a-f]\{64\}$' dist/compose.yaml)" = 2 ]
+          if grep -q '^    build:' dist/compose.yaml; then exit 1; fi
+          cp .env.example dist/env.example
+          (cd dist && cp env.example .env && docker compose config --quiet && rm .env)
+          cat dist/compose.yaml
+      - uses: sigstore/cosign-installer@v4
+      - name: Sign compose.yaml (keyless) and write SHA256SUMS
+        working-directory: dist
+        run: |
+          cosign sign-blob --yes --bundle compose.yaml.sigstore.json compose.yaml
+          sha256sum compose.yaml env.example compose.yaml.sigstore.json > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            /^## \[/ { if (on) exit; if (index($0, "[" v "]")) { on = 1; next } }
+            on { print }' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+          cat >> notes.md <<EOF
+
+          ## Install or update
+
+          \`\`\`bash
+          curl -fsSL https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh | sudo bash
+          \`\`\`
+
+          Manual installation with compose.yaml: docs/ADMIN_GUIDE.md. Images (signed with Sigstore, see docs/SECURITY.md):
+
+          - \`$PANEL\`
+          - \`$WEB\`
+          EOF
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE: ${{ needs.version.outputs.stable }}
+        run: |
+          flags=(--draft)
+          [ "$STABLE" = true ] || flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Sudoo.sh $VERSION" --notes-file notes.md "${flags[@]}" \
+            dist/compose.yaml dist/env.example dist/compose.yaml.sigstore.json dist/SHA256SUMS

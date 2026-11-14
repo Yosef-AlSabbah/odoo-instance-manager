@@ -1,5 +1,6 @@
 # The panel image: Python with the dependencies locked in uv.lock, plus the Docker CLI and Compose plugin (to manage
-# instances on the host's Docker), git and SSH (to fetch code with deploy keys).
+# instances on the host's Docker), git and SSH (to fetch code with deploy keys), and the documentation shown in the
+# panel (README.md and docs/). Released as ghcr.io/sudoo-sh/sudoo-panel for linux/amd64 and linux/arm64.
 FROM python:3.15-alpine
 
 LABEL org.opencontainers.image.title="Sudoo" \
@@ -24,8 +25,10 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
-COPY documentation ./documentation
 RUN uv sync --frozen --no-dev
+# the documentation of this very version, shown under Help (DOCS_DIR, /app/documentation)
+COPY README.md ./documentation/README.md
+COPY docs ./documentation/docs
 
 # `sudoo.sh serve` starts gunicorn with one process (jobs, monitor and gateway share its memory), listening
 # where the exposure plugin needs it: 127.0.0.1 behind a tunnel, every interface when visitors connect directly.

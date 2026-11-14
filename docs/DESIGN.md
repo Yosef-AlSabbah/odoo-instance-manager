@@ -175,7 +175,7 @@ Implementation rules:
 | To change | Do this |
 | :--- | :--- |
 | The accent colour | Settings, Contact and appearance, **Accent colour** (or `BRAND_COLOR` in `.env`); it also colours the e-mails |
-| Neutrals, radii, spacing, motion | Edit `web/src/styles/_tokens.scss` (both the light block and the `dark` mixin), then rebuild: `./install.sh` on the server, or `npm run build` |
+| Neutrals, radii, spacing, motion | Edit `web/src/styles/_tokens.scss` (both the light block and the `dark` mixin), then rebuild: `docker compose build web` on the server, or `npm run build` |
 | Fonts | `--font` and `--mono` in `_tokens.scss`; add the font files with `npm install @fontsource/<name>` and import them in `web/src/main.tsx` |
 | One component | Its block in `_components.scss` or `_pages.scss`, named after the component |
 | The e-mails | Templates in `src/sudoo/mail/templates/`, or your own folder with `MAIL_TEMPLATES_DIR` ([Configuration](CONFIGURATION.md)) |
