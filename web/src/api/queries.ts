@@ -12,7 +12,8 @@ import type {
   InstalledPlugin,
   MarketplaceStatus,
   PluginNotice,
-  Purchase,
+  CheckoutSession,
+  Recommendation,
   AuditEntry,
   Backup,
   Credentials,
@@ -48,7 +49,7 @@ export const keys = {
   pluginNotices: ["plugins", "notices"] as const,
   marketplace: ["marketplace"] as const,
   catalog: (query: string) => ["marketplace", "catalog", query] as const,
-  purchases: ["marketplace", "purchases"] as const,
+  purchases: ["marketplace", "checkout-sessions"] as const,
 };
 
 export const useSession = () =>
@@ -185,7 +186,15 @@ export const useBilling = (enabled: boolean) =>
 export const useReceipts = (enabled: boolean) =>
   useQuery({ queryKey: ["marketplace", "receipts"], queryFn: () => api.get<Receipt[]>("/marketplace/receipts"), enabled, retry: false });
 export const usePurchases = (enabled: boolean) =>
-  useQuery({ queryKey: keys.purchases, queryFn: () => api.get<Purchase[]>("/marketplace/purchases"), enabled, retry: false });
+  useQuery({ queryKey: keys.purchases, queryFn: () => api.get<CheckoutSession[]>("/marketplace/checkout-sessions"), enabled, retry: false });
+export const useRecommendations = (enabled: boolean) =>
+  useQuery({
+    queryKey: ["marketplace", "recommendations"],
+    queryFn: () => api.get<Recommendation[]>("/marketplace/recommendations?limit=8"),
+    enabled,
+    retry: false,
+    staleTime: 600_000,
+  });
 
 /** A mutation that refreshes the given queries afterwards. */
 export function useCall<TArgs, TResult>(fn: (args: TArgs) => Promise<TResult>, refresh: readonly (readonly unknown[])[] = []) {

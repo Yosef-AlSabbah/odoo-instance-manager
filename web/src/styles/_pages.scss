@@ -466,6 +466,45 @@
   min-width: 0;
   max-width: 100%;
   .tag { height: 18px; font-size: 11px; }
+  .verified { display: inline-flex; color: var(--positive); svg { width: 14px; height: 14px; } }
+}
+.plugin-icon {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: 9px;
+  object-fit: contain;
+  background: var(--raised);
+  &.lg { width: 44px; height: 44px; border-radius: 11px; }
+}
+.plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  .plan {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s3) var(--s4);
+    border: 1px solid var(--hairline-strong);
+    border-radius: var(--radius-control);
+    cursor: pointer;
+    transition: border-color 160ms ease-out, background-color 160ms ease-out;
+    &:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+    input { accent-color: var(--accent); }
+    .plan-price { font-weight: 500; }
+  }
+}
+.reco-row {
+  display: grid;
+  gap: var(--s3);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(240px, 1fr);
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  padding-bottom: var(--s2);
+  > * { scroll-snap-align: start; }
+  .reco-why { font-size: var(--text-12); color: var(--text-3); }
 }
 .notices {
   width: 100%;

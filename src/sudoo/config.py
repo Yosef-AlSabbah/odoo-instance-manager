@@ -160,13 +160,35 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ marketplace (docs/MARKETPLACE.md)
     marketplace: bool = Field(
         False,
-        description="Use the Sudoo.sh marketplace: register with the hub, send a signed heartbeat every 6 hours, "
+        description="Use the Sudoo.sh marketplace: register with the hub, send a signed heartbeat every 15 minutes, "
         "install plugins. Off: the panel never contacts the hub; installed free plugins keep working.",
     )
     hub_url: str = Field(
         "https://hub.sudoo.sh",
         description="Address of the Sudoo.sh hub (https; http only for localhost while testing).",
     )
+    hub_public_keys: str = Field(
+        "",
+        description="The hub's root public keys (Ed25519, base64url, comma-separated); empty: the keys this release "
+        "ships for hub.sudoo.sh, or the hub's keys as first seen for another hub.",
+    )
+
+    @field_validator("hub_public_keys")
+    @classmethod
+    def _hub_public_keys(cls, value: str) -> str:
+        import base64
+        import binascii
+        import re
+
+        keys = [part.strip() for part in value.split(",") if part.strip()]
+        for key in keys:
+            try:
+                raw = base64.urlsafe_b64decode(key + "=" * (-len(key) % 4))
+            except (binascii.Error, ValueError):
+                raw = b""
+            if not re.fullmatch(r"[A-Za-z0-9_-]{43}", key) or len(raw) != 32:
+                raise ValueError("each key must be an Ed25519 public key in base64url (43 characters)")
+        return ",".join(keys)
 
     @field_validator("hub_url")
     @classmethod

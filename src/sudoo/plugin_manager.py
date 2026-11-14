@@ -20,9 +20,15 @@ Integrity
 
 Licences of paid plugins
     The signed lease of the last heartbeat gives each paid plugin's licence dates; they are copied into the
-    plugin's record. A paid plugin runs while the lease is valid and its licence has not passed its grace date.
-    When the grace ends, the panel backs up its own data and the instances the plugin may change, then switches
-    the plugin off (its data and settings are kept) and e-mails the super admins. A renewal switches it on again.
+    plugin's record. A paid plugin runs until its `run_until` (the lease's end, plus 96 hours for an active
+    licence; never past the licence's grace date) and while the hub does not withhold it (`blocked`: a copied
+    server). Then the panel backs up its own data and the instances the plugin may change, switches the plugin off
+    (its data and settings are kept) and e-mails the super admins. A renewal (a newer lease) switches it on again.
+
+Removing paid plugins (the hub's command)
+    When the server is unlinked from its account, the hub sends the signed command remove_paid_plugins. The panel
+    backs up its data (and the instances the plugins may change), removes the listed paid plugins (free ones stay),
+    restarts and acknowledges the command. Carried out once; a repeated command is only acknowledged again.
 
 Records are kept in the panel's storage, collection "plugins", one document per plugin id.
 """
@@ -179,15 +185,17 @@ def _paid(rec: dict[str, Any]) -> bool:
 
 
 def licence_end(rec: dict[str, Any]) -> float | None:
-    """When a paid plugin stops: the licence's grace date, or its expiry when it has no grace."""
+    """When a paid plugin's licence is over: its grace date, or its expiry when it has no grace; None for a
+    perpetual (one-time) licence."""
     licence = rec.get("licence") or {}
     end = licence.get("grace_until") or licence.get("expires_at")
     return float(end) if end else None
 
 
 def allowed(rec: dict[str, Any], now: float | None = None, lease_valid: bool | None = None) -> tuple[bool, str]:
-    """Whether the plugin should run now, and why not: disabled, modified, blocked, no_lease, unlicensed or
-    licence_ended."""
+    """Whether the plugin should run now, and why not: disabled, modified, blocked (the hub refuses the panel),
+    withheld (the hub withholds paid licences from this server: a copy), no_lease (no newer lease before its
+    run_until), unlicensed or licence_ended."""
     if rec.get("tampered"):
         return False, "modified"
     if not rec.get("enabled", True):
@@ -197,16 +205,23 @@ def allowed(rec: dict[str, Any], now: float | None = None, lease_valid: bool | N
     if not _paid(rec):
         return True, "ok"
     now = marketplace.trusted_now() if now is None else now
-    if lease_valid is None:
-        lease_valid = marketplace.lease() is not None
-    if not lease_valid:
-        return False, "no_lease"
-    if rec.get("standing") not in ("licensed", "grace"):
-        return False, "unlicensed" if rec.get("standing") in (None, "unlicensed", "unknown") else "licence_ended"
+    standing = rec.get("standing")
+    if standing == "blocked":
+        return False, "withheld"
+    if standing not in ("licensed", "grace"):
+        return False, "unlicensed" if standing in (None, "unlicensed", "unknown") else "licence_ended"
+    licence = rec.get("licence") or {}
     end = licence_end(rec)
     if end is not None and now >= end:
         return False, "licence_ended"
-    return True, "ok"
+    run_until = licence.get("run_until")
+    if run_until is not None:  # measured with the trusted clock (signed issue time + monotonic time)
+        if now >= float(run_until):
+            return False, "no_lease"
+        return True, "ok"
+    if lease_valid is None:  # a licence recorded before run_until existed: the lease itself must be valid
+        lease_valid = marketplace.lease() is not None
+    return (True, "ok") if lease_valid else (False, "no_lease")
 
 
 def allowed_ids() -> set[str]:
@@ -557,14 +572,21 @@ def _hub_message(error: HubRefused) -> str:
         "integrity_violation": "The marketplace refuses this panel: its core files differ from the released ones.",
         "installation_suspended": "This panel is suspended on the marketplace. Contact Sudoo.sh support.",
         "incompatible": "No version of this plugin runs on this panel's version of Sudoo.sh yet.",
-        "purchases_not_allowed": "The account owner has not allowed purchases from this server (app.sudoo.sh, Servers).",
-        "spending_limit": f"This server's monthly spending limit is reached. {error.detail}",
+        "fingerprint_mismatch": "This server reported from another machine, so its paid plugins are withheld. The "
+        "account owner must accept this machine on app.sudoo.sh (Servers).",
         "already_licensed": "This server already has a licence for this plugin: install it.",
         "not_for_sale": "This plugin is free: install it.",
         "developer_not_payable": "This plugin cannot be bought right now (its publisher cannot receive payments).",
-        "purchase_in_progress": "A purchase of this plugin is already under way. Look at Purchases, or try again "
-        "in a minute.",
+        "purchase_in_progress": "A payment for this plugin is already under way on app.sudoo.sh. Finish it there, "
+        "or try again in a few minutes.",
+        "idempotency_key_reused": "This purchase request was already used for another plan. Press Buy again.",
         "payments_disabled": "Payments are switched off on the marketplace right now. Try again later.",
+        "account_has_server": "This account already has a server. Unlink it on app.sudoo.sh first: an account "
+        "links one server.",
+        "already_linked": "This server is linked to another account. Log out of it first (Settings, Marketplace).",
+        "bad_link_code": "This code is not valid or has expired. Make a new one on app.sudoo.sh (Servers).",
+        "key_revoked": "This server's key was revoked on app.sudoo.sh. The panel registers again with a new "
+        "identity; link it to your account again.",
     }.get(error.code or "", error.detail)
 
 
@@ -795,10 +817,23 @@ def touches_instances(rec: dict[str, Any]) -> bool:
     return bool({"instances.write", "docker"} & set(rec.get("permissions") or []))
 
 
-def _licence_ended(job: Job, plugin_id: str) -> None:
-    """At the end of a paid plugin's grace: back up, switch it off (keeping data), tell the super admins."""
+def _backup_instances(job: Job, title: str) -> list[str]:
+    """Back up every instance (each its own job) and wait; the ones that failed, in words."""
     from sudoo.instances import operations, store
 
+    problems: list[str] = []
+    started = [jobs.start(n, title, "backup", operations.backup, n) for n in store.names()]
+    for backup_job in started:
+        while backup_job.finished is None:
+            time.sleep(2)
+        if backup_job.status != "success":
+            problems.append(f"instance {backup_job.instance} (job {backup_job.id})")
+    return problems
+
+
+def _licence_ended(job: Job, plugin_id: str) -> None:
+    """At the end of a paid plugin's licence (or its run_until): back up, switch it off (keeping data), tell the
+    super admins."""
     rec = record(plugin_id) or {}
     name = rec.get("name", plugin_id)
     job.expect(3)
@@ -812,18 +847,17 @@ def _licence_ended(job: Job, plugin_id: str) -> None:
         job.note(f"The panel's data could not be backed up: {error}", "warning")
     if touches_instances(rec):
         job.step("Backing up the instances the plugin can change")
-        started = [jobs.start(n, f"Back up before {name} stops", "backup", operations.backup, n) for n in store.names()]
-        for backup_job in started:
-            while backup_job.finished is None:
-                time.sleep(2)
-            if backup_job.status != "success":
-                problems.append(f"instance {backup_job.instance} (job {backup_job.id})")
+        problems += _backup_instances(job, f"Back up before {name} stops")
     job.step("Switching the plugin off")
     _update(plugin_id, switched_off={"at": time.time(), "reason": "licence", "backup_problems": problems})
     audit.record("system", None, "plugin switched off (licence ended)", detail=plugin_id)
+    ended = allowed({**rec, "enabled": True, "tampered": False})[1] == "licence_ended"
     text = (
         f"The licence of {name} ended and its grace period is over, so the panel switched it off. Its data and "
         "settings are kept: renew it on app.sudoo.sh and the panel switches it back on by itself."
+        if ended
+        else f"The panel has not reached the marketplace for too long to keep running {name}, so it switched it "
+        "off. Its data and settings are kept: it comes back on by itself after the next heartbeat that passes."
     )
     if problems:
         text += " Some backups taken before switching it off failed: " + "; ".join(problems) + "."
@@ -885,6 +919,79 @@ def watch_forever() -> None:
             log.exception("plugin watchdog failed")
 
 
+# ---------------------------------------------------------------- the hub's command: remove paid plugins
+
+_COMMANDS: set[str] = set()  # commands being carried out in this process
+
+
+def start_command(command_id: str, payload: dict[str, Any]) -> None:
+    """Start removing the paid plugins a remove_paid_plugins command lists (a job), unless it already runs."""
+    with _LOCK:
+        if command_id in _COMMANDS:
+            return
+        _COMMANDS.add(command_id)
+    listed = [str(p) for p in payload.get("plugins") or [] if isinstance(p, str) and PLUGIN_ID_RE.match(p)]
+    reason = str(payload.get("reason") or "unlinked")
+    marketplace.record_command(command_id, kind="remove_paid_plugins", status="running", at=time.time(),
+                               plugins=listed, reason=reason)  # fmt: skip
+    marketplace._save(linked=None)  # the hub sends it when this server was unlinked (or its key revoked)
+    jobs.start(JOB_INSTANCE, "Remove paid plugins (logged out of the account)", "plugin-remove-paid",
+               remove_paid_plugins, command_id, listed, reason)  # fmt: skip
+
+
+def remove_paid_plugins(job: Job, command_id: str, listed: list[str], reason: str) -> None:
+    """The hub's remove_paid_plugins: back up, remove the listed paid plugins that are installed (never a free
+    one), restart, acknowledge. Without a backup of the panel's data nothing is removed and the command is tried
+    again with the next heartbeat (the plugins do not run meanwhile: their licences are revoked)."""
+    try:
+        targets = [rec for pid, rec in records().items() if pid in listed and _paid(rec)]
+        if not targets:
+            job.note("None of the listed paid plugins is installed: nothing to remove.")
+            _finish_command(command_id, "done", "Nothing to remove.")
+            return
+        names = ", ".join(str(rec.get("name", rec["id"])) for rec in targets)
+        job.expect(3 + any(touches_instances(rec) for rec in targets))
+        job.step("Backing up the panel's data")
+        try:
+            saved = panel_backup("before-removing-paid-plugins")
+        except Exception as error:  # noqa: BLE001 - reported, then tried again with the next heartbeat
+            marketplace.record_command(command_id, status="pending", detail=f"panel backup failed: {error}")
+            raise JobError(f"The panel's data could not be backed up ({error}); nothing was removed. The panel "
+                           "tries again with the next heartbeat.") from None  # fmt: skip
+        job.note(f"Panel data saved: {saved.name}")
+        problems: list[str] = []
+        if any(touches_instances(rec) for rec in targets):
+            job.step("Backing up the instances the plugins can change")
+            problems = _backup_instances(job, "Back up before paid plugins are removed")
+        job.step("Removing the paid plugins")
+        for rec in targets:
+            shutil.rmtree(plugins_dir() / rec["id"], ignore_errors=True)
+            storage().delete(COLLECTION, rec["id"])
+            audit.record("system", None, "paid plugin removed (logged out of the account)", detail=rec["id"])
+            events.publish("plugins", rec["id"], {"changed": True})
+            job.write(f"Removed {rec['id']} {rec['version']}\n")
+        detail = f"Removed {', '.join(rec['id'] for rec in targets)}."
+        if problems:
+            detail += " Some instance backups failed: " + "; ".join(problems) + "."
+        text = (
+            f"This server was logged out of its Sudoo.sh account ({reason.replace('_', ' ')}), so its paid "
+            f"plugins were removed: {names}. The panel's data was backed up first ({saved.name}); free plugins and "
+            "instances keep running. Link the server again and buy them again to get them back."
+        )
+        _mail_super_admins("Paid plugins were removed", "Paid plugins were removed", text)
+        job.step("Restarting the panel")
+        _finish_command(command_id, "done", detail)
+        schedule_restart("paid plugins removed (logged out of the account)")
+    finally:
+        with _LOCK:
+            _COMMANDS.discard(command_id)
+
+
+def _finish_command(command_id: str, status: str, detail: str) -> None:
+    marketplace.record_command(command_id, status=status, detail=detail, at=time.time(), acked=False)
+    marketplace.acknowledge(command_id, status, detail)
+
+
 def _date(timestamp: float | int) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(float(timestamp)))
 
@@ -916,13 +1023,16 @@ def _mail_super_admins(subject: str, title: str, text: str) -> None:
 
 
 def phase(rec: dict[str, Any], now: float, lease_valid: bool) -> str | None:
-    """Licence phase of a paid plugin: active, expiring (7 days before), grace, ended, no_lease, unlicensed."""
+    """Licence phase of a paid plugin: active, perpetual, expiring (7 days before), grace, ended, no_lease,
+    withheld, unlicensed."""
     if not _paid(rec):
         return None
     ok, reason = allowed({**rec, "enabled": True, "tampered": False}, now, lease_valid)
     if not ok:
         return {"licence_ended": "ended", "no_lease": "no_lease", "unlicensed": "unlicensed"}.get(reason, reason)
     licence = rec.get("licence") or {}
+    if licence.get("perpetual"):
+        return "perpetual"
     expires = licence.get("expires_at")
     if expires and now >= float(expires):
         return "grace"
@@ -935,7 +1045,7 @@ def status_of(rec: dict[str, Any], now: float, lease_valid: bool) -> str:
     ok, reason = allowed(rec, now, lease_valid)
     if ok:
         return "active"
-    return {"licence_ended": "switched_off", "no_lease": "switched_off"}.get(reason, reason)
+    return {"licence_ended": "switched_off", "no_lease": "switched_off"}.get(reason, reason)  # or withheld
 
 
 def notices() -> list[dict[str, Any]]:
@@ -947,6 +1057,15 @@ def notices() -> list[dict[str, Any]]:
                       "text": "The marketplace refuses this panel, so every plugin is switched off: "
                       + ("its core files differ from the released version." if blocked == "integrity_violation"
                          else "the installation is suspended. Contact Sudoo.sh support.")})  # fmt: skip
+    if "fingerprint_mismatch" in marketplace.flags():
+        found.append({"plugin": None, "kind": "fingerprint_mismatch", "level": "danger",
+                      "text": "This server is flagged: it reported from another machine than the one it was "
+                      "registered on, so its paid plugins are withheld. The account owner must accept this machine "
+                      "on app.sudoo.sh (Servers), or revoke the key if it is a copy."})  # fmt: skip
+    if marketplace.state().get("key_revoked_at") and not marketplace.state().get("linked"):
+        found.append({"plugin": None, "kind": "key_revoked", "level": "warning",
+                      "text": "This server's key was revoked on app.sudoo.sh, so it registered again with a new "
+                      "identity. Link it to your account again (Settings, Marketplace) to use paid plugins."})  # fmt: skip
     for rec in records().values():
         name = rec.get("name", rec["id"])
         if rec.get("tampered"):
@@ -969,5 +1088,10 @@ def notices() -> list[dict[str, Any]]:
                           "text": f"{name} is switched off: its licence ended. Renew it and it comes back on by itself; its data is kept."})  # fmt: skip
         elif current == "no_lease":
             found.append({"plugin": rec["id"], "kind": "no_lease", "level": "danger",
-                          "text": f"{name} is switched off: the panel has not reached the marketplace for 7 days."})  # fmt: skip
+                          "text": f"{name} is switched off: the panel has not reached the marketplace for too long. "
+                          "It comes back on after the next heartbeat that passes."})  # fmt: skip
+        elif current == "withheld":
+            found.append({"plugin": rec["id"], "kind": "withheld", "level": "danger",
+                          "text": f"{name} is switched off: the marketplace withholds this server's paid licences "
+                          "(it reported from another machine)."})  # fmt: skip
     return found

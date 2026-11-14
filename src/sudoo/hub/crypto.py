@@ -1,4 +1,5 @@
-"""The cryptography the panel shares with the hub (hub.sudoo.sh): signed requests, package signatures and leases.
+"""The cryptography the panel shares with the hub (hub.sudoo.sh): signed requests and answers, package signatures,
+leases, commands, key endorsements and the server's fingerprint (the formats of the sudoo-hub README).
 
 Signed requests
     Every request to the hub that needs to say which panel sends it carries X-Sudoo-Installation, X-Sudoo-Timestamp,
@@ -12,14 +13,39 @@ Signed requests
         <nonce>
         <SHA-256 of the body, hex>
 
+Signed answers
+    Every answer of the hub to a signed request (refusals included) carries
+    `Sudoo-Signature: kid=<key id>, ts=<Unix seconds>, sig=<base64url>`, the hub key's Ed25519 signature of:
+
+        sudoo-hub-response-v1
+        <METHOD of the request>
+        <path of the request, with ?query when there is one>
+        <installation id of the request>
+        <nonce of the request>
+        <HTTP status>
+        <ts>
+        <SHA-256 of the answer's body, hex (a package download: its X-Sudoo-Package-SHA256)>
+
 Package signatures
     The hub signs "sudoo-plugin-v1\\n<plugin id>\\n<version>\\n<sha256 of the package>" with its Ed25519 key, so a
     signature binds one package to one plugin and one version (an old release cannot be passed off as an update).
 
 Leases
     A heartbeat answers with a lease: a JWT signed by the hub key (alg EdDSA, kid = key id), for this installation
-    (aud "sudoo-panel:<id>"), valid 7 days. It says the standing of each reported plugin and the licence dates of
-    the paid ones. Only the signed claims are trusted, never the plain JSON next to it.
+    (aud "sudoo-panel:<id>"), valid 72 hours. It says the standing of each reported plugin, the licence dates of
+    the paid ones (with `run_until`, when the plugin must stop without a newer lease), the commands not acknowledged
+    yet and the flags. Only the signed claims are trusted, never the plain JSON next to it.
+
+Commands
+    Each command is signed on its own: "sudoo-hub-command-v1\n<id>\n<installation id>\n<kind>\n<issued_at>\n<SHA-256 of
+    the payload as canonical JSON (sorted keys, no spaces, UTF-8)>".
+
+Key endorsements
+    A new hub key is trusted only when the key active before it signed "sudoo-hub-key-v1\n<key id>\n<public key>\n
+    <not_before, Unix seconds>" and that key is already trusted (and not revoked).
+
+Fingerprint
+    SHA-256 (hex) of "sudoo-fingerprint-v1\n<installation public key>\n<machine id>\n<primary MAC>".
 """
 
 from __future__ import annotations
@@ -38,6 +64,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 REQUEST_DOMAIN = "sudoo-hub-request-v1"
+RESPONSE_DOMAIN = "sudoo-hub-response-v1"
+COMMAND_DOMAIN = "sudoo-hub-command-v1"
+KEY_DOMAIN = "sudoo-hub-key-v1"
+FINGERPRINT_DOMAIN = "sudoo-fingerprint-v1"
+ANSWER_SKEW_SECONDS = 300  # an answer whose signed time is further from the panel's clock is refused
+RESPONSE_HEADER = "Sudoo-Signature"
 PACKAGE_DOMAIN = b"sudoo-plugin-v1"
 LEASE_TYPE = "sudoo-lease+jwt"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -124,6 +156,108 @@ def signed_headers(
     }
 
 
+# ---------------------------------------------------------------- signed answers
+
+
+def response_message(
+    method: str, path_with_query: str, installation_id: str, nonce: str, status: int, timestamp: int, body_sha256: str
+) -> bytes:
+    lines = (
+        RESPONSE_DOMAIN,
+        method.upper(),
+        path_with_query,
+        installation_id,
+        nonce,
+        str(status),
+        str(timestamp),
+        body_sha256,
+    )
+    return "\n".join(lines).encode()
+
+
+def parse_response_signature(header: str) -> tuple[str, int, bytes] | None:
+    """(key id, ts, signature) of a Sudoo-Signature header, or None when it is malformed."""
+    parts: dict[str, str] = {}
+    for item in header.split(","):
+        name, _, value = item.strip().partition("=")
+        parts[name] = value
+    try:
+        timestamp = parts["ts"]
+        if not timestamp.isdigit() or len(timestamp) > 12:
+            return None
+        signature = from_b64url(parts["sig"])
+        if not re.fullmatch(r"[0-9a-f]{16}", parts["kid"]):
+            return None
+        return parts["kid"], int(timestamp), signature
+    except (KeyError, ValueError):
+        return None
+
+
+class AnswerError(ValueError):
+    """An answer of the hub that the panel must not believe: unsigned, badly signed, too old, or by a key it does
+    not accept. `unknown_key` is set when only the key was unknown (fetching the hub's keys may help)."""
+
+    def __init__(self, message: str, unknown_key: str | None = None) -> None:
+        super().__init__(message)
+        self.unknown_key = unknown_key
+
+
+def verify_answer(
+    keys: dict[str, Ed25519PublicKey],
+    header: str | None,
+    *,
+    method: str,
+    path_with_query: str,
+    installation_id: str,
+    nonce: str,
+    status: int,
+    body_sha256: str,
+    now: float,
+) -> str:
+    """Check the Sudoo-Signature of one answer; returns the key id, raises AnswerError."""
+    parsed = parse_response_signature(header or "")
+    if parsed is None:
+        raise AnswerError("the answer is not signed")
+    kid, timestamp, signature = parsed
+    if abs(timestamp - now) > ANSWER_SKEW_SECONDS:
+        raise AnswerError("the answer's time is more than 5 minutes from this server's clock (check the clock)")
+    key = keys.get(kid)
+    if key is None:
+        raise AnswerError("the answer is signed with a key this panel does not accept", unknown_key=kid)
+    message = response_message(method, path_with_query, installation_id, nonce, status, timestamp, body_sha256)
+    if not verify(key, signature, message):
+        raise AnswerError("the answer's signature is not valid")
+    return kid
+
+
+# ---------------------------------------------------------------- commands and keys
+
+
+def canonical_json(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def command_message(command_id: str, installation_id: str, kind: str, issued_at: int, payload: Any) -> bytes:
+    lines = (
+        COMMAND_DOMAIN,
+        command_id,
+        installation_id,
+        kind,
+        str(issued_at),
+        hashlib.sha256(canonical_json(payload)).hexdigest(),
+    )
+    return "\n".join(lines).encode()
+
+
+def endorsement_message(key_id: str, public_key: str, not_before: int) -> bytes:
+    return "\n".join((KEY_DOMAIN, key_id, public_key, str(not_before))).encode()
+
+
+def fingerprint(public_key: str, machine_id: str, mac: str) -> str:
+    """The hardware fingerprint the hub keeps (as a keyed digest): installation key, machine id and primary MAC."""
+    return hashlib.sha256("\n".join((FINGERPRINT_DOMAIN, public_key, machine_id, mac)).encode()).hexdigest()
+
+
 # ---------------------------------------------------------------- packages
 
 
@@ -171,7 +305,8 @@ class Lease:
 
     @property
     def licences(self) -> dict[str, dict[str, Any]]:
-        """For each paid plugin with a licence: {"state", "expires_at", "grace_until"} (Unix seconds or None)."""
+        """For each paid plugin with a licence: {"state", "expires_at", "grace_until", "run_until", "perpetual"}
+        (Unix seconds or None; run_until: when the plugin must stop unless a newer lease arrives)."""
         value = self.claims.get("licenses") or {}
         if not isinstance(value, dict):
             return {}
@@ -182,8 +317,16 @@ class Lease:
                     "state": str(item.get("state") or ""),
                     "expires_at": _int_or_none(item.get("expires_at")),
                     "grace_until": _int_or_none(item.get("grace_until")),
+                    "run_until": _int_or_none(item.get("run_until")),
+                    "perpetual": item.get("perpetual") is True,
                 }
         return result
+
+    @property
+    def flags(self) -> list[str]:
+        """Why licences are withheld: ["fingerprint_mismatch"] for a server that reported from another machine."""
+        value = self.claims.get("flags") or []
+        return [str(flag) for flag in value] if isinstance(value, list) else []
 
 
 def _int_or_none(value: Any) -> int | None:

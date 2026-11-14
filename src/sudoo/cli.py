@@ -97,7 +97,7 @@ def test_email(args: argparse.Namespace) -> None:
 
 def marketplace(args: argparse.Namespace) -> None:
     """status: the connection to the hub and the installed plugins; heartbeat: send one now; repin: forget the
-    pinned hub keys so the next heartbeat fetches and pins them again (after the hub changed its key)."""
+    trusted hub keys so the next heartbeat starts again from the root keys (only when Sudoo.sh announces it)."""
     from sudoo import plugin_manager
     from sudoo.hub import HubRefused, HubUnavailable, client
     from sudoo.hub import marketplace as hub
@@ -105,7 +105,7 @@ def marketplace(args: argparse.Namespace) -> None:
     if args.action == "repin":
         client.update_identity(hub_keys={}, hub_url=None, registered_at=None)
         audit.record("command line", None, "marketplace keys forgotten (repin)")
-        print("The hub's keys are forgotten; the next heartbeat fetches and pins them again.")
+        print("The hub's keys are forgotten; the next heartbeat starts again from the root keys.")
     if args.action in ("heartbeat", "repin"):
         try:
             hub.heartbeat()

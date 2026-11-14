@@ -1,15 +1,16 @@
 // The connection to the Sudoo.sh marketplace: shown on Settings (Marketplace) and inside the Plugins page.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { BadgeCheck, Link2, RefreshCcw, ShieldCheck } from "lucide-react";
+import { BadgeCheck, Link2, LogOut, RefreshCcw } from "lucide-react";
 import { useState } from "react";
 import { api, errorText } from "@/api/client";
-import { keys, useMarketplace } from "@/api/queries";
+import { keys, useMarketplace, usePlugins } from "@/api/queries";
 import type { MarketplaceStatus, Publisher } from "@/api/types";
 import { ago, dateTime } from "@/lib/format";
 import { useCan } from "./Shell";
+import { Mark } from "./ui/Brand";
 import { Button, Callout, Field, Skeleton, Tag } from "./ui/basics";
-import { useToast } from "./ui/overlay";
+import { Modal, useToast } from "./ui/overlay";
 
 /** Official (Sudoo.sh's own plugins) or Verified (Sudoo.sh checked who the publisher is). */
 export function PublisherBadge({ publisher }: { publisher: Publisher | null }) {
@@ -18,9 +19,11 @@ export function PublisherBadge({ publisher }: { publisher: Publisher | null }) {
     <span className="publisher">
       <span className="truncate">{publisher.name}</span>
       {publisher.official ? (
-        <Tag tone="accent" icon={<ShieldCheck />}>Official</Tag>
+        <Tag tone="accent" icon={<Mark size={12} />}>Official</Tag>
       ) : publisher.verified ? (
-        <Tag icon={<BadgeCheck />}>Verified</Tag>
+        <span className="verified" title="Verified publisher: Sudoo.sh checked who they are" aria-label="Verified publisher">
+          <BadgeCheck />
+        </span>
       ) : null}
     </span>
   );
@@ -34,10 +37,20 @@ export function marketplaceProblem(status: MarketplaceStatus | undefined): { ton
     return { tone: "danger", text: "The marketplace refuses this panel: its core files differ from the released version. Every plugin is switched off until the panel is reinstalled." };
   if (status.hub_status === "installation_suspended")
     return { tone: "danger", text: "This panel is suspended on the marketplace, so every plugin is switched off. Contact Sudoo.sh support." };
+  if (status.error_code === "unverified")
+    return {
+      tone: "danger",
+      text: "The marketplace's last answer was not signed by a key this panel trusts, so it was ignored. Installed plugins keep working; the panel tries again on its own. If this lasts, tell Sudoo.sh support.",
+    };
+  if (status.flags?.includes("fingerprint_mismatch"))
+    return {
+      tone: "danger",
+      text: "This server is flagged: it reported from another machine than the one it was registered on, so its paid plugins are withheld. The account owner must accept this machine on app.sudoo.sh (Servers), or revoke its key if it is a copy.",
+    };
   if (status.reachable === false)
     return {
       tone: "warning",
-      text: `The marketplace cannot be reached right now${status.lease_valid ? "" : ", and the panel has not reached it for 7 days, so paid plugins are switched off"}. Instances and installed plugins keep working; the panel tries again every 15 minutes.`,
+      text: `The marketplace cannot be reached right now${status.lease_valid ? "" : ", and the panel's last lease has ended: paid plugins stop when their offline time runs out"}. Instances and installed plugins keep working; the panel tries again every few minutes.`,
     };
   return null;
 }
@@ -89,6 +102,9 @@ export function MarketplaceSettings() {
   const client = useQueryClient();
   const toast = useToast();
   const [sending, setSending] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const { data: installed } = usePlugins();
   if (isPending) return <div className="card-body"><Skeleton height={120} /></div>;
   if (!status) return null;
   const problem = marketplaceProblem(status);
@@ -104,9 +120,28 @@ export function MarketplaceSettings() {
       setSending(false);
     }
   };
+  const paid = (installed ?? []).filter((p) => p.tier === "paid");
+  const logOut = async () => {
+    setLoggingOut(true);
+    try {
+      await api.post("/marketplace/unlink", { confirm: true });
+      toast("success", "Logged out of the account", paid.length ? "The paid plugins are being removed after a backup" : undefined);
+      setLeaving(false);
+    } catch (error) {
+      toast("error", "Still logged in", errorText(error));
+    } finally {
+      await client.invalidateQueries({ queryKey: keys.marketplace });
+      await client.invalidateQueries({ queryKey: keys.plugins });
+      setLoggingOut(false);
+    }
+  };
   return (
     <div className="card-body stack">
       {problem && <Callout tone={problem.tone}>{problem.text}</Callout>}
+      {status.key_revoked_at && !status.linked?.account_name && (
+        <Callout tone="warning">This server's key was revoked on app.sudoo.sh, so the panel registered again with a new identity. Link it to your account again to use paid plugins.</Callout>
+      )}
+      {status.removing_paid_plugins && <Callout tone="info">The panel is removing this server's paid plugins (it was logged out of its account). A backup is taken first.</Callout>}
       <dl className="dl">
         <dt>Hub</dt>
         <dd className="mono small">{status.hub_url}</dd>
@@ -137,8 +172,39 @@ export function MarketplaceSettings() {
             <Button size="sm" icon={<RefreshCcw />} loading={sending} onClick={heartbeat}>
               Send a heartbeat now
             </Button>
+            {status.linked?.account_name && (
+              <Button size="sm" variant="ghost" icon={<LogOut />} onClick={() => setLeaving(true)}>
+                Log out of the account
+              </Button>
+            )}
           </div>
         </>
+      )}
+      {leaving && (
+        <Modal
+          title="Log out of the account?"
+          description={`This server stops belonging to ${status.linked?.account_name ?? "its account"} on app.sudoo.sh.`}
+          onClose={() => setLeaving(false)}
+          footer={
+            <>
+              <Button onClick={() => setLeaving(false)}>Cancel</Button>
+              <Button variant="danger" icon={<LogOut />} loading={loggingOut} onClick={logOut}>Log out and remove paid plugins</Button>
+            </>
+          }
+        >
+          <div className="stack-sm">
+            <p>
+              <b>Paid plugins are removed.</b> Their licences for this server are revoked at once and subscriptions end without a refund.
+              The panel backs up its data (and the instances those plugins can change) first.
+            </p>
+            {paid.length > 0 ? (
+              <div className="row-wrap">{paid.map((p) => <Tag key={p.id}>{p.name}</Tag>)}</div>
+            ) : (
+              <p className="small muted">No paid plugin is installed.</p>
+            )}
+            <p className="small muted">The panel, free plugins and every instance keep running. You can link the server to an account again later.</p>
+          </div>
+        </Modal>
       )}
     </div>
   );

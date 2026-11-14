@@ -10,26 +10,32 @@
     POST   /api/v1/marketplace/link                {"code"}: link this panel to an app.sudoo.sh account
     POST   /api/v1/marketplace/heartbeat           send the heartbeat now
     GET    /api/v1/marketplace/catalog             the catalogue for this panel, with each plugin's action
-    GET    /api/v1/marketplace/catalog/<id>        one plugin's public page: permissions, screenshots, plans
+    GET    /api/v1/marketplace/catalog/<id>        one plugin's page: permissions, plans (reported as a view)
     GET    /api/v1/marketplace/categories          plugin types with counts
-    GET    /api/v1/marketplace/billing             may this server buy, its limit, the card a purchase charges
-    GET    /api/v1/marketplace/purchases           purchases asked for from this server (?format=csv for a file)
-    POST   /api/v1/marketplace/purchases           buy {"plugin_id", "plan_id", "idempotency_key"}
-    GET    /api/v1/marketplace/purchases/<id>      one purchase (the web app follows a Checkout with it)
+    GET    /api/v1/marketplace/recommendations     plugins the hub suggests for this server, with the reasons
+    GET    /api/v1/marketplace/icons/<id>?v=       a plugin's icon (fetched from the hub, signed)
+    POST   /api/v1/marketplace/unlink              {"confirm": true}: log out of the account (paid plugins go)
+    GET    /api/v1/marketplace/billing             can a checkout session be opened now, and if not why
+    POST   /api/v1/marketplace/checkout-sessions   buy {"plugin_id", "plan_id", "idempotency_key"}: a payment
+                                                   page on app.sudoo.sh, where the account owner pays
+    GET    /api/v1/marketplace/checkout-sessions/<id>   one session (the web app polls it while the owner pays)
+    GET    /api/v1/marketplace/checkout-sessions   sessions opened from this server (?format=csv for a file)
     GET    /api/v1/marketplace/receipts            receipts of this server's plugins (?format=csv for a file)
 
-Seeing needs "plugins.view" (super admins and administrators); installing, buying, switching and linking need
-"settings.manage" (super admins). No endpoint returns a plugin's files or package.
+Seeing needs "plugins.view" (super admins and administrators); installing, buying, switching, linking and logging
+out need "settings.manage" (super admins). No endpoint returns a plugin's files or package, and the panel never
+charges anything: purchases are paid by the account owner on app.sudoo.sh.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import re
 import threading
 import time
 from typing import Any, NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from flask import Blueprint, Response, abort, g, request
 
@@ -55,7 +61,7 @@ def _hub_error(error: Exception) -> NoReturn:
     if isinstance(error, HubUnavailable):
         abort(503, UNREACHABLE)
     if isinstance(error, HubRefused):
-        status = {404: 404, 422: 400, 429: 429}.get(error.status, 409)
+        status = {404: 404, 422: 400, 429: 429, 503: 503}.get(error.status, 409)
         abort(status, plugin_manager._hub_message(error))
     raise error
 
@@ -111,7 +117,8 @@ def plugin_resource(
         "permissions": rec.get("permissions", []),
         "requires": rec.get("requires", []),
         "enabled": rec.get("enabled", True),
-        # active, disabled, modified, blocked, switched_off (licence ended or no lease), unlicensed
+        # active, disabled, modified, blocked, withheld (copied server), switched_off (licence ended or no lease),
+        # unlicensed
         "status": plugin_manager.status_of(rec, now, lease_valid),
         "loaded": loaded,
         "restart_pending": loaded != running,
@@ -121,6 +128,8 @@ def plugin_resource(
                 "standing": rec.get("standing"),
                 "expires_at": iso(licence.get("expires_at")),
                 "grace_until": iso(licence.get("grace_until")),
+                "run_until": iso(licence.get("run_until")),
+                "perpetual": bool(licence.get("perpetual")),
                 "phase": plugin_manager.phase(rec, now, lease_valid),
             }
             if rec.get("tier") == "paid"
@@ -255,7 +264,7 @@ def uninstall(plugin_id: str) -> Response:
 @require("plugins.view")
 def status() -> Response:
     current = marketplace.status()
-    for key in ("last_heartbeat_at", "next_heartbeat_at", "lease_expires_at"):
+    for key in ("last_heartbeat_at", "next_heartbeat_at", "lease_expires_at", "key_revoked_at"):
         current[key] = iso(current[key])
     return ok(current)
 
@@ -318,9 +327,12 @@ def catalog() -> Response:
     except (HubUnavailable, HubRefused) as error:
         _hub_error(error)
     installed_versions = {pid: rec["version"] for pid, rec in plugin_manager.records().items()}
+    shown = []
     for item in items:  # what is on disk now (the hub knows what the last heartbeat reported)
         item["installed_version"] = installed_versions.get(str(item.get("id")))
-    return ok(items, meta=meta)
+        item["plans"] = [plan_resource(plan) for plan in item.get("plans") or [] if isinstance(plan, dict)]
+        shown.append(_with_icon(item))
+    return ok(shown, meta=meta)
 
 
 @blueprint.get("/marketplace/catalog/<plugin_id>")
@@ -333,7 +345,10 @@ def catalog_plugin(plugin_id: str) -> Response:
         _hub_error(error)
     rec = plugin_manager.record(plugin_id)
     detail["installed_version"] = rec["version"] if rec else None
-    return ok(detail)
+    detail["plans"] = [plan_resource(plan) for plan in detail.get("plans") or [] if isinstance(plan, dict)]
+    # the plugin's page is shown: a recommendation signal for the hub (kept only with the owner's consent)
+    threading.Thread(target=marketplace.report_view, args=(plugin_id,), daemon=True).start()
+    return ok(_with_icon(detail))
 
 
 @blueprint.get("/marketplace/categories")
@@ -354,37 +369,52 @@ def _https(value: Any) -> str | None:
 @blueprint.get("/marketplace/billing")
 @require("plugins.view")
 def billing() -> Response:
+    """Whether a checkout session can be opened now; also keeps the panel's idea of its account up to date."""
     _marketplace_on()
     try:
         found = marketplace.billing()
     except (HubUnavailable, HubRefused) as error:
         _hub_error(error)
-    keys = ("payments_enabled", "linked", "account_name", "purchases_allowed", "monthly_limit_cents",
-            "spent_this_month_cents", "remaining_cents", "currency", "card")  # fmt: skip
-    return ok({**{key: found.get(key) for key in keys}, "manage_url": _https(found.get("manage_url"))})
+    keys = ("payments_enabled", "linked", "account_name", "can_buy", "reason", "currency")
+    answer = {**{key: found.get(key) for key in keys}, "manage_url": _https(found.get("manage_url"))}
+    linked = (marketplace.state().get("linked") or {}).get("account_name")
+    if bool(answer["linked"]) != bool(linked) or (answer["linked"] and answer["account_name"] != linked):
+        marketplace._save(linked={"account_name": answer["account_name"]} if answer["linked"] else None)
+    return ok(answer)
 
 
 def _plugin_name(plugin_id: Any) -> Any:
-    """The hub's purchases name the plugin by id only: use the name of the installed plugin when there is one."""
+    """The name of the installed plugin when the hub's answer does not give one."""
     rec = plugin_manager.record(plugin_id) if isinstance(plugin_id, str) else None
     return rec.get("name", plugin_id) if rec else plugin_id
 
 
-def purchase_resource(item: dict[str, Any]) -> dict[str, Any]:
-    """A purchase as the hub's panel contract shows it, with only https links."""
+PLAN_KEYS = ("id", "kind", "price_cents", "currency", "period_days", "interval", "perpetual",
+             "monthly_equivalent_cents", "savings_percent")  # fmt: skip
+
+
+def plan_resource(plan: Any) -> dict[str, Any] | None:
+    return {key: plan.get(key) for key in PLAN_KEYS} if isinstance(plan, dict) else None
+
+
+def session_resource(item: dict[str, Any]) -> dict[str, Any]:
+    """A checkout session as the hub's panel contract shows it, with only an https payment link."""
     requested: dict[str, Any] = item["requested_by"] if isinstance(item.get("requested_by"), dict) else {}
+    status = item.get("status")  # open, processing, checkout_required, succeeded, expired, cancelled, failed
     return {
         "id": str(item.get("id", "")),
         "plugin_id": item.get("plugin_id"),
         "plugin_name": item.get("plugin_name") or _plugin_name(item.get("plugin_id")),
         "plan_id": item.get("plan_id"),
         "plan_kind": item.get("plan_kind"),
+        "plan": plan_resource(item.get("plan")),
         "amount_cents": item.get("amount_cents"),
         "currency": item.get("currency"),
-        "status": item.get("status"),  # succeeded, processing, checkout_required, failed, expired
+        "status": status,
         "method": item.get("method"),  # saved_card or checkout
         "reason": item.get("reason"),
-        "checkout_url": _https(item.get("checkout_url")),
+        "url": _https(item.get("url")) if status in ("open", "processing", "checkout_required") else None,
+        "expires_at": item.get("expires_at"),
         "license": item.get("license"),
         "receipt_number": item.get("receipt_number"),
         "requested_by": {"name": requested.get("name"), "email": requested.get("email")},
@@ -416,12 +446,12 @@ def _cell(value: Any) -> str:
     return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
 
 
-@blueprint.get("/marketplace/purchases")
+@blueprint.get("/marketplace/checkout-sessions")
 @require("plugins.view")
-def purchases() -> Response:
+def checkout_sessions() -> Response:
     _marketplace_on()
     try:
-        found = [purchase_resource(p) for p in marketplace.purchases()]
+        found = [session_resource(p) for p in marketplace.checkout_sessions()]
     except (HubUnavailable, HubRefused) as error:
         _hub_error(error)
     if request.args.get("format") == "csv":
@@ -448,7 +478,7 @@ def receipts() -> Response:
 
 
 def _requested_by() -> dict[str, str]:
-    """Who pressed Buy: kept with the purchase and printed on the receipt."""
+    """Who pressed Buy: shown to the account owner on the checkout page and printed on the receipt."""
     account = accounts.get(g.user["name"]) or {}
     email = account.get("email") or ""
     if not email:
@@ -457,34 +487,115 @@ def _requested_by() -> dict[str, str]:
     return {"name": "".join(c for c in name if c not in "<>")[:120] or g.user["name"], "email": email}
 
 
-@blueprint.post("/marketplace/purchases")
+@blueprint.post("/marketplace/checkout-sessions")
 @require("settings.manage")
-def buy() -> Response:
+def open_checkout() -> Response:
+    """Ask to buy: the hub opens a checkout session; the web app opens its `url` (app.sudoo.sh) in a new tab, where
+    the account owner pays. The panel never charges anything."""
     _marketplace_on()
     data = check.body()
     plugin_id = check.plugin_id(check.text(data, "plugin_id", max_length=128))
     plan_id = check.hub_reference(check.text(data, "plan_id", max_length=64), "plan")
     key = check.idempotency_key(check.text(data, "idempotency_key", max_length=64))
     try:
-        bought = purchase_resource(marketplace.buy(plugin_id, plan_id, key, _requested_by()))
+        session = session_resource(marketplace.open_checkout(plugin_id, plan_id, key, _requested_by()))
     except (HubUnavailable, HubRefused) as error:
-        log("plugin purchase refused", ok=False, detail=plugin_id)
+        log("checkout session refused", ok=False, detail=plugin_id)
         _hub_error(error)
-    log("plugin purchase", detail=f"{plugin_id} {bought['status']} {bought['method'] or ''}".strip())
-    if bought["status"] == "succeeded":  # the saved card was charged: install at once, when the panel can
-        if blocked := _install_blocked():  # paid all the same: never answer an error for a purchase that went through
-            return ok({"purchase": bought, "job": None, "install_error": blocked})
-        job = _start_install(plugin_id, None, f"Install {plugin_id}")
-        return ok({"purchase": bought, "job": job_resource(job), "install_error": None}, status=202)
-    return ok({"purchase": bought, "job": None, "install_error": None})
+    if session["url"] is None and session["status"] in ("open", "processing", "checkout_required"):
+        abort(503, "The marketplace did not send a payment page the panel can open. Try again later.")
+    log("checkout session opened", detail=f"{plugin_id} {session['plan_kind'] or ''}".strip())
+    response = ok(session, status=201)
+    response.headers["Location"] = f"{PREFIX}/marketplace/checkout-sessions/{session['id']}"
+    return response
 
 
-@blueprint.get("/marketplace/purchases/<purchase_id>")
+@blueprint.get("/marketplace/checkout-sessions/<session_id>")
 @require("settings.manage")
-def purchase(purchase_id: str) -> Response:
+def checkout_session(session_id: str) -> Response:
     _marketplace_on()
     try:
-        found = marketplace.purchase(check.hub_reference(purchase_id, "purchase"))
+        found = marketplace.checkout_session(check.hub_reference(session_id, "checkout session"))
     except (HubUnavailable, HubRefused) as error:
         _hub_error(error)
-    return ok(purchase_resource(found))
+    return ok(session_resource(found))
+
+
+@blueprint.post("/marketplace/unlink")
+@require("settings.manage")
+def unlink() -> Response:
+    """Log out of the account: the hub revokes this server's paid licences and the panel removes its paid plugins
+    (after a backup). The panel, free plugins and instances keep running."""
+    _marketplace_on()
+    if check.body().get("confirm") is not True:
+        abort(400, 'To log out of the account, send {"confirm": true}.')
+    try:
+        marketplace.unlink()
+    except (HubUnavailable, HubRefused) as error:
+        log("log out of the Sudoo.sh account refused", ok=False)
+        _hub_error(error)
+    log("panel logged out of its Sudoo.sh account")
+    return status()
+
+
+@blueprint.get("/marketplace/recommendations")
+@require("plugins.view")
+def recommended() -> Response:
+    _marketplace_on()
+    limit = check.whole_number(request.args.get("limit", "8"), "limit", minimum=1, maximum=24)
+    try:
+        found = marketplace.recommendations(limit)
+    except (HubUnavailable, HubRefused) as error:
+        _hub_error(error)
+    picks = []
+    for item in found:
+        plugin = item.get("plugin")
+        if not isinstance(plugin, dict) or not isinstance(plugin.get("id"), str):
+            continue
+        reasons = [str(r)[:200] for r in item.get("reasons") or [] if isinstance(r, str)][:3]
+        picks.append({"plugin": _with_icon(plugin), "score": item.get("score"), "reasons": reasons})
+    return ok(picks)
+
+
+# ---------------------------------------------------------------- plugin icons, through the panel
+
+_ICON_RE = re.compile(r"^[0-9a-f]{6,64}$")
+_ICONS: dict[tuple[str, str], tuple[bytes, str]] = {}
+_ICON_TYPES = ("image/png", "image/svg+xml")
+
+
+def _with_icon(item: dict[str, Any]) -> dict[str, Any]:
+    """The hub's icon_url (an address on the hub, which the web app's CSP does not load) as the panel's own
+    address for it, or null."""
+    url = item.get("icon_url")
+    parts = urlsplit(url) if isinstance(url, str) else None
+    tag = parse_qs(parts.query).get("v", [""])[0] if parts else ""
+    plugin_id = str(item.get("id") or "")
+    expected = f"/api/v1/catalog/{plugin_id}/icon"
+    if parts is None or parts.path != expected or not _ICON_RE.match(tag) or not check.PLUGIN_ID_RE.match(plugin_id):
+        return {**item, "icon_url": None}
+    return {**item, "icon_url": f"{PREFIX}/marketplace/icons/{plugin_id}?v={tag}"}
+
+
+@blueprint.get("/marketplace/icons/<plugin_id>")
+@require("plugins.view")
+def plugin_icon(plugin_id: str) -> Response:
+    """A plugin's icon (PNG or SVG; the hub cleans SVGs at upload, and the panel serves them with a CSP that runs
+    nothing). Kept in memory once fetched."""
+    _marketplace_on()
+    plugin_id = check.plugin_id(plugin_id)
+    tag = request.args.get("v", "")
+    if not _ICON_RE.match(tag):
+        abort(404)
+    cached = _ICONS.get((plugin_id, tag))
+    if cached is None:
+        try:
+            data, kind = marketplace.icon(plugin_id, tag)
+        except (HubUnavailable, HubRefused):
+            abort(404)
+        if kind not in _ICON_TYPES:
+            abort(404)
+        if len(_ICONS) >= 500:
+            _ICONS.clear()
+        cached = _ICONS[(plugin_id, tag)] = (data, kind)
+    return Response(cached[0], mimetype=cached[1])

@@ -310,10 +310,14 @@ export interface Publisher {
 
 export interface PricePlan {
   id: string;
-  kind: "monthly" | "yearly" | "fixed_term";
+  kind: "monthly" | "yearly" | "fixed_term" | "one_time";
   price_cents: number;
   currency: string;
   period_days: number | null;
+  interval: "month" | "year" | "days" | null;
+  perpetual: boolean;
+  monthly_equivalent_cents: number | null;
+  savings_percent: number | null;
 }
 
 export interface PluginVersionInfo {
@@ -338,13 +342,24 @@ export interface CatalogPlugin {
   rating_count?: number;
   install_count: number;
   publisher: Publisher | null;
+  countries?: string[];
+  languages?: string[];
+  odoo_versions?: string[];
+  local?: boolean | null;
   requires: { id: string; version: string | null }[];
   plans: PricePlan[];
   latest_version: PluginVersionInfo | null;
   compatible_version: PluginVersionInfo | null;
   installed_version: string | null;
-  license: { state: string; expires_at: string | null; grace_until: string | null } | null;
+  license: { state: string; expires_at: string | null; grace_until: string | null; perpetual?: boolean } | null;
   action: CatalogAction;
+}
+
+/** GET /marketplace/recommendations: a plugin the hub suggests, and why. */
+export interface Recommendation {
+  plugin: Omit<CatalogPlugin, "plans" | "latest_version" | "compatible_version" | "installed_version" | "license" | "action">;
+  score: number;
+  reasons: string[];
 }
 
 /** GET /marketplace/catalog/<id>: the plugin's public page. */
@@ -352,22 +367,20 @@ export interface CatalogPluginDetail {
   id: string;
   homepage?: string | null;
   permissions: string[];
+  plans?: PricePlan[];
 }
 
 export interface Billing {
   payments_enabled: boolean;
   linked: boolean;
   account_name: string | null;
-  purchases_allowed: boolean;
-  monthly_limit_cents: number | null;
-  spent_this_month_cents: number | null;
-  remaining_cents: number | null;
+  can_buy: boolean;
+  reason: "payments_disabled" | "link_required" | "fingerprint_mismatch" | "installation_suspended" | null;
   currency: string;
-  card: { brand: string; last4: string; exp_month: number; exp_year: number; expired: boolean } | null;
   manage_url: string | null;
 }
 
-export type LicencePhase = "active" | "expiring" | "grace" | "ended" | "no_lease" | "unlicensed";
+export type LicencePhase = "active" | "perpetual" | "expiring" | "grace" | "ended" | "no_lease" | "withheld" | "unlicensed";
 
 export interface InstalledPlugin {
   id: string;
@@ -379,7 +392,7 @@ export interface InstalledPlugin {
   publisher: Publisher | null;
   permissions: string[];
   enabled: boolean;
-  status: "active" | "disabled" | "modified" | "blocked" | "switched_off" | "unlicensed";
+  status: "active" | "disabled" | "modified" | "blocked" | "withheld" | "switched_off" | "unlicensed";
   loaded: boolean;
   restart_pending: boolean;
   licence: {
@@ -387,6 +400,8 @@ export interface InstalledPlugin {
     standing: string | null;
     expires_at: string | null;
     grace_until: string | null;
+    run_until: string | null;
+    perpetual: boolean;
     phase: LicencePhase | null;
   } | null;
   latest_version: string | null;
@@ -412,7 +427,11 @@ export interface MarketplaceStatus {
   error: string | null;
   error_code: string | null;
   hub_status: string | null;
-  linked: { account_name: string | null; linked_at: string | null } | null;
+  hub_keys: string[];
+  flags: string[];
+  linked: { account_name: string | null; linked_at?: string | null } | null;
+  key_revoked_at: string | null;
+  removing_paid_plugins: boolean;
   last_heartbeat_at: string | null;
   next_heartbeat_at: string | null;
   lease_expires_at: string | null;
@@ -420,18 +439,21 @@ export interface MarketplaceStatus {
   lease_ending_soon: boolean;
 }
 
-export interface Purchase {
+/** A checkout session: the account owner pays it on app.sudoo.sh (`url`); the panel never charges anything. */
+export interface CheckoutSession {
   id: string;
   plugin_id: string | null;
   plugin_name: string | null;
   plan_id: string | null;
   plan_kind: string | null;
+  plan: PricePlan | null;
   amount_cents: number | null;
   currency: string | null;
-  status: "succeeded" | "processing" | "checkout_required" | "failed" | "expired" | null;
+  status: "open" | "processing" | "checkout_required" | "succeeded" | "expired" | "cancelled" | "failed" | null;
   method: "saved_card" | "checkout" | null;
   reason: string | null;
-  checkout_url: string | null;
+  url: string | null;
+  expires_at: string | null;
   receipt_number: string | null;
   requested_by: { name: string | null; email: string | null };
   created_at: string | null;

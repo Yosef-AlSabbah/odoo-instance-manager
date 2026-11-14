@@ -1,13 +1,16 @@
 // Plugins: the marketplace's catalogue, the installed plugins (versions, updates, licences) and the purchases of
 // this server. Installing is one click for a free plugin: a job downloads and verifies the package, then the backend
-// restarts on its own and a toast says when the plugin is ready. The panel never shows a plugin's code.
+// restarts on its own and a toast says when the plugin is ready. Buying opens a checkout session: the account owner
+// pays on app.sudoo.sh in another tab, this page follows it and installs once paid. The panel never charges anything
+// and never shows a plugin's code.
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Download, ExternalLink, FileDown, Puzzle, Receipt, Search, ShoppingBag, Star, Trash2 } from "lucide-react";
+import { Download, ExternalLink, FileDown, MapPin, Puzzle, Receipt, Search, ShoppingBag, Sparkles, Star, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router";
 import { api, ApiError, errorText } from "@/api/client";
 import {
+  keys,
   useBilling,
   useCatalog,
   useCatalogPlugin,
@@ -17,8 +20,9 @@ import {
   usePlugins,
   usePurchases,
   useReceipts,
+  useRecommendations,
 } from "@/api/queries";
-import type { CatalogPlugin, InstalledPlugin, Job, PricePlan, Purchase } from "@/api/types";
+import type { CatalogPlugin, CheckoutSession, InstalledPlugin, Job, PricePlan, Recommendation } from "@/api/types";
 import { JobLine, Monogram } from "@/components/InstanceCard";
 import { JobDrawer } from "@/components/JobDrawer";
 import { LinkForm, marketplaceProblem, PublisherBadge } from "@/components/Marketplace";
@@ -48,18 +52,46 @@ const TYPE_LABEL: Record<string, string> = {
   mcp: "MCP",
   extension: "Extensions",
 };
-const PLAN_LABEL: Record<string, string> = { monthly: "month", yearly: "year", fixed_term: "term" };
-const PLAN_NAME: Record<string, string> = { monthly: "Monthly", yearly: "Yearly", fixed_term: "Fixed term" };
+const PLAN_NAME: Record<string, string> = { monthly: "Monthly", yearly: "Yearly", fixed_term: "Fixed term", one_time: "One time" };
 
-function planPrice(plan: PricePlan) {
-  const per = plan.kind === "fixed_term" ? `${plan.period_days ?? "?"} days` : PLAN_LABEL[plan.kind];
-  return `${money(plan.price_cents, plan.currency)} / ${per}`;
+/** An amount without ".00" when it is whole: 10000, "usd" -> "$100". */
+function price(cents: number, currency: string) {
+  const text = money(cents, currency);
+  return cents % 100 === 0 ? text.replace(/[.,]00(?=\D*$)/, "") : text;
+}
+
+/** "$100/year · $8.33/month · save 17%", "$250 once, no renewal", "$30 for 90 days · $10.15/month". */
+export function planPrice(plan: PricePlan) {
+  const parts: string[] = [];
+  if (plan.kind === "one_time" || plan.perpetual) return `${price(plan.price_cents, plan.currency)} once, no renewal`;
+  if (plan.kind === "fixed_term") parts.push(`${price(plan.price_cents, plan.currency)} for ${plan.period_days ?? "?"} days`);
+  else parts.push(`${price(plan.price_cents, plan.currency)}/${plan.kind === "yearly" ? "year" : "month"}`);
+  if (plan.kind !== "monthly" && plan.monthly_equivalent_cents != null) parts.push(`${money(plan.monthly_equivalent_cents, plan.currency)}/month`);
+  if (plan.savings_percent) parts.push(`save ${plan.savings_percent}%`);
+  return parts.join(" · ");
 }
 
 /** Free, or the cheapest plan (the hub lists plans cheapest first). */
-function priceOf(plugin: CatalogPlugin) {
+function priceOf(plugin: Pick<CatalogPlugin, "tier"> & { plans?: PricePlan[] }) {
   if (plugin.tier === "free") return "Free";
-  return plugin.plans?.[0] ? planPrice(plugin.plans[0]) : "Paid";
+  const plan = plugin.plans?.[0];
+  if (!plan) return "Paid";
+  return plan.perpetual ? `${price(plan.price_cents, plan.currency)} once` : `${price(plan.price_cents, plan.currency)}/${plan.kind === "yearly" ? "year" : plan.kind === "fixed_term" ? `${plan.period_days ?? "?"} days` : "month"}`;
+}
+
+/** The plugin's icon (through the panel), or its monogram. */
+function PluginIcon({ plugin, large }: { plugin: { name: string; icon_url?: string | null }; large?: boolean }) {
+  const [broken, setBroken] = useState(false);
+  if (!plugin.icon_url || broken) return <Monogram name={plugin.name} large={large} />;
+  return <img className={`plugin-icon ${large ? "lg" : ""}`} src={plugin.icon_url} alt="" loading="lazy" onError={() => setBroken(true)} />;
+}
+
+/** "Made for your country", or the countries a plugin is made for. */
+function Countries({ plugin }: { plugin: { countries?: string[]; local?: boolean | null } }) {
+  if (plugin.local) return <Tag tone="accent" icon={<MapPin />}>Made for your country</Tag>;
+  if (!plugin.countries?.length) return null;
+  const shown = plugin.countries.slice(0, 3).join(", ") + (plugin.countries.length > 3 ? ` +${plugin.countries.length - 3}` : "");
+  return <Tag icon={<MapPin />}>{shown}</Tag>;
 }
 
 /** A new key for each press of Buy; the same key is sent again if that one request is retried. */
@@ -69,15 +101,14 @@ function newIdempotencyKey() {
 }
 
 const REASON: Record<string, string> = {
-  no_card: "No saved card: pay on Stripe's page",
-  card_expired: "The saved card has expired",
-  authentication_required: "The bank asks to confirm the payment",
   card_declined: "The card was declined",
   insufficient_funds: "The card was declined (insufficient funds)",
-  payment_service_unreachable: "The payment service could not be reached",
+  expired_card: "The card has expired",
+  authentication_required: "The bank asked to confirm the payment",
   checkout_expired: "The payment page expired",
   checkout_failed: "The payment did not go through",
-  amount_mismatch: "The amount did not match",
+  link_changed: "The server's account changed meanwhile",
+  payment_service_unreachable: "The payment service could not be reached",
 };
 const reasonText = (reason: string | null) => (reason ? REASON[reason] ?? reason.replace(/_/g, " ") : "");
 
@@ -159,7 +190,7 @@ function PluginCard({ plugin, onOpen }: { plugin: CatalogPlugin; onOpen: () => v
   return (
     <button type="button" className="card link plugin-card" onClick={onOpen}>
       <div className="pc-head">
-        <Monogram name={plugin.name} />
+        <PluginIcon plugin={plugin} />
         <div className="pc-titles">
           <span className="pc-name truncate">{plugin.name}</span>
           <PublisherBadge publisher={plugin.publisher} />
@@ -173,7 +204,7 @@ function PluginCard({ plugin, onOpen }: { plugin: CatalogPlugin; onOpen: () => v
         </span>
         <span className="xsmall faint">{number(plugin.install_count)} {plugin.install_count === 1 ? "install" : "installs"}</span>
         <span className="spacer" />
-        {label && <Tag tone={tone}>{label}</Tag>}
+        {label ? <Tag tone={tone}>{label}</Tag> : <Countries plugin={plugin} />}
       </div>
     </button>
   );
@@ -196,12 +227,15 @@ function PluginSheet({
   const can = useCan();
   const manage = can("settings.manage");
   const paid = plugin.tier === "paid" && (plugin.action === "buy" || plugin.action === "renew");
+  const plans = plugin.plans?.length ? plugin.plans : detail?.plans ?? [];
   const { data: billing, error: billingError } = useBilling(manage && paid);
   const toast = useToast();
+  const client = useQueryClient();
   const [plan, setPlan] = useState<string>("");
   const [step, setStep] = useState<"idle" | "working" | "paying">("idle");
-  const [purchase, setPurchase] = useState<Purchase | null>(null);
-  const chosen = plugin.plans?.find((p) => p.id === plan) ?? plugin.plans?.[0];
+  const [session, setSession] = useState<CheckoutSession | null>(null);
+  const [ended, setEnded] = useState<string | null>(null);
+  const chosen = plans.find((p) => p.id === plan) ?? plans[0];
   const repair = installed?.status === "modified";
   const action = repair ? "install" : plugin.action;
 
@@ -211,31 +245,38 @@ function PluginSheet({
     onClose();
   };
 
-  // a purchase under way (Checkout in another tab, or Stripe still working): follow it every 3 seconds and when
-  // this tab gets the focus back, until it succeeds (install) or fails
+  // a checkout session the owner pays on app.sudoo.sh: follow it every 4 seconds and when this tab gets the focus
+  // back, while it is open, processing or on Stripe; install once it succeeded
   useEffect(() => {
-    if (step !== "paying" || !purchase) return;
+    if (step !== "paying" || !session) return;
     let stop = false;
     let checking = false;
-    const started = Date.now();
     const check = async () => {
       if (stop || checking) return;
       checking = true;
       try {
-        const current = await api.get<Purchase>(`/marketplace/purchases/${purchase.id}`);
+        const current = await api.get<CheckoutSession>(`/marketplace/checkout-sessions/${session.id}`);
         if (stop) return;
+        setSession(current);
         if (current.status === "succeeded") {
           stop = true;
           toast("success", "Payment received", `Installing ${plugin.name}`);
+          void client.invalidateQueries({ queryKey: keys.purchases });
           try {
             await install();
           } catch (err) {
             toast("error", `Paid, but ${plugin.name} is not installed yet`, `${errorText(err)} Install it from the Marketplace.`);
             setStep("idle");
           }
-        } else if (current.status === "failed" || current.status === "expired") {
+        } else if (current.status === "expired" || current.status === "cancelled" || current.status === "failed") {
           stop = true;
-          toast("error", "The payment did not go through", reasonText(current.reason) || "Nothing was charged. Try again when you are ready.");
+          setEnded(
+            current.status === "expired"
+              ? "The payment page expired before it was paid. Nothing was charged."
+              : current.status === "cancelled"
+                ? "The purchase was cancelled on app.sudoo.sh. Nothing was charged."
+                : `The payment did not go through${current.reason ? `: ${reasonText(current.reason).toLowerCase()}` : ""}.`,
+          );
           setStep("idle");
         }
       } catch (err) {
@@ -248,7 +289,7 @@ function PluginSheet({
         checking = false;
       }
     };
-    const timer = setInterval(() => (Date.now() - started > 24 * 3600_000 ? setStep("idle") : void check()), 3000);
+    const timer = setInterval(() => void check(), 4000);
     const focus = () => document.visibilityState === "visible" && void check();
     document.addEventListener("visibilitychange", focus);
     window.addEventListener("focus", focus);
@@ -258,7 +299,7 @@ function PluginSheet({
       document.removeEventListener("visibilitychange", focus);
       window.removeEventListener("focus", focus);
     };
-  }, [step, purchase]);
+  }, [step, session?.id]);
 
   const installNow = async () => {
     setStep("working");
@@ -273,45 +314,27 @@ function PluginSheet({
   const buy = async () => {
     if (!chosen) return;
     setStep("working");
-    // opened now, while the click still counts, so the browser does not block it; filled in once the hub answers
-    const tab = billing?.card && !billing.card.expired ? null : window.open("about:blank", "_blank");
+    setEnded(null);
+    // opened now, while the click still counts, so the browser does not block it; sent to the payment page once
+    // the hub answers
+    const tab = window.open("about:blank", "_blank");
     try {
       const body = { plugin_id: plugin.id, plan_id: chosen.id, idempotency_key: newIdempotencyKey() };
-      const answer = await api.post<{ purchase: Purchase; job: Job | null; install_error: string | null }>(
-        "/marketplace/purchases",
-        body,
-      );
-      const bought = answer.purchase;
-      if (bought.status === "succeeded" && !answer.job) {
-        // paid, but the panel cannot install right now (jobs running, a restart coming): the licence is kept
+      const opened = await api.post<CheckoutSession>("/marketplace/checkout-sessions", body);
+      if (opened.status === "succeeded") {
         tab?.close();
-        toast("success", "Paid", `${answer.install_error ?? ""} Install ${plugin.name} from the Marketplace then.`.trim());
-        onClose();
+        setSession(opened);
+        setStep("paying");
         return;
       }
-      if (answer.job) {
-        tab?.close();
-        toast("success", `Paid with the saved card${billing?.card ? ` •••• ${billing.card.last4}` : ""}`, `Installing ${plugin.name}`);
-        onStarted(answer.job, plugin.name);
-        onClose();
-        return;
-      }
-      if (bought.status === "checkout_required" && bought.checkout_url) {
-        if (tab) {
-          tab.opener = null;
-          tab.location.href = bought.checkout_url;
-        } else {
-          window.open(bought.checkout_url, "_blank", "noopener");
-        }
+      if (!opened.url) throw new Error("The marketplace did not send a payment page.");
+      if (tab) {
+        tab.opener = null;
+        tab.location.href = opened.url;
       } else {
-        tab?.close();
+        window.open(opened.url, "_blank", "noopener");
       }
-      if (bought.status === "failed" || bought.status === "expired") {
-        toast("error", "Not bought", reasonText(bought.reason) || "The payment did not go through.");
-        setStep("idle");
-        return;
-      }
-      setPurchase(bought);
+      setSession(opened);
       setStep("paying");
     } catch (err) {
       tab?.close();
@@ -330,19 +353,25 @@ function PluginSheet({
           {repair ? "Install again" : action === "update" ? `Update to v${plugin.compatible_version?.version ?? ""}` : "Install"}
         </Button>
       );
-    const blocked = !billing?.linked || !billing.purchases_allowed || !billing.payments_enabled;
     return (
-      <Button variant="primary" icon={<ShoppingBag />} loading={step === "working"} disabled={busy || blocked || !chosen || step === "paying"} onClick={buy}>
-        {action === "renew" ? "Renew & install" : "Buy & install"}
+      <Button variant="primary" icon={<ShoppingBag />} loading={step === "working"} disabled={busy || !billing?.can_buy || !chosen || step === "paying"} onClick={buy}>
+        {action === "renew" ? "Renew on app.sudoo.sh" : "Buy on app.sudoo.sh"}
       </Button>
     );
   };
+
+  const waiting =
+    session?.status === "processing"
+      ? "The payment is being processed."
+      : session?.status === "open" && session.reason
+        ? `${reasonText(session.reason)}. Try another card in the other tab.`
+        : "Waiting for payment in the other tab.";
 
   const version = plugin.compatible_version ?? plugin.latest_version;
   return (
     <Modal
       wide
-      title={<span className="row"><Monogram name={plugin.name} /> {plugin.name}</span>}
+      title={<span className="row"><PluginIcon plugin={plugin} large /> {plugin.name}</span>}
       description={<PublisherBadge publisher={plugin.publisher} />}
       onClose={onClose}
       footer={
@@ -358,7 +387,8 @@ function PluginSheet({
           <Tag>{TYPE_LABEL[plugin.type] ?? plugin.type}</Tag>
           {version && <Tag mono>v{version.version}</Tag>}
           {version?.min_sudoo_version && <Tag mono>Sudoo.sh {version.min_sudoo_version}+</Tag>}
-          <Tag tone={plugin.tier === "free" ? "positive" : undefined}>{priceOf(plugin)}</Tag>
+          <Tag tone={plugin.tier === "free" ? "positive" : undefined}>{priceOf({ ...plugin, plans })}</Tag>
+          <Countries plugin={plugin} />
         </div>
         {(detail?.permissions?.length ?? 0) > 0 && (
           <Field label="It asks to">
@@ -370,49 +400,70 @@ function PluginSheet({
             <div className="row-wrap">{plugin.requires.map((r) => <Tag key={r.id} mono>{r.id} {r.version ?? ""}</Tag>)}</div>
           </Field>
         )}
-        {plugin.license?.expires_at && (
+        {plugin.license?.perpetual ? (
+          <p className="small muted">Licence {plugin.license.state}, perpetual.</p>
+        ) : plugin.license?.expires_at ? (
           <p className="small muted">Licence {plugin.license.state}, ends {day(plugin.license.expires_at)}.</p>
-        )}
+        ) : null}
         {paid && manage && (
           <>
-            {(plugin.plans?.length ?? 0) > 1 && (
+            {plans.length > 0 && (
               <Field label="Plan">
-                <Segmented value={chosen?.id ?? ""} onChange={setPlan} options={plugin.plans.map((p) => ({ value: p.id, label: planPrice(p) }))} />
+                <div className="plan-list" role="radiogroup">
+                  {plans.map((p) => (
+                    <label key={p.id} className="plan">
+                      <input type="radio" name="plan" value={p.id} checked={chosen?.id === p.id} onChange={() => setPlan(p.id)} disabled={step === "paying"} />
+                      <span className="stack-sm" style={{ gap: 0 }}>
+                        <span className="plan-price">{PLAN_NAME[p.kind] ?? p.kind}</span>
+                        <span className="small muted">{planPrice(p)}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
               </Field>
             )}
             {chosen && (
               <p className="small muted">
-                {planPrice(chosen)}
-                {chosen.kind === "fixed_term" ? ", paid once." : ", renewed until it is cancelled on app.sudoo.sh."}{" "}
-                {billing?.card && !billing.card.expired
-                  ? `It is charged to the saved ${billing.card.brand} card ending ${billing.card.last4}.`
-                  : "You pay on Stripe's page, in a new tab."}
-                {billing?.remaining_cents != null && ` ${money(billing.remaining_cents, billing.currency)} left of this server's monthly limit.`}
+                {chosen.perpetual
+                  ? "Paid once, a licence that does not expire."
+                  : chosen.kind === "fixed_term"
+                    ? "Paid once, for the term."
+                    : "Renewed until it is cancelled on app.sudoo.sh."}{" "}
+                The account owner pays on app.sudoo.sh, in a new tab; this panel never charges anything.
               </p>
             )}
             {billingError && <Callout tone="warning">{errorText(billingError)}</Callout>}
-            {billing && !billing.linked && (
+            {billing?.reason === "link_required" && (
               <Callout tone="info">
                 <div className="stack-sm">
                   <span>Paid plugins belong to an account on app.sudoo.sh. Link this panel to yours first.</span>
-                  <LinkForm />
+                  <LinkForm onLinked={() => void client.invalidateQueries({ queryKey: ["marketplace", "billing"] })} />
                 </div>
               </Callout>
             )}
-            {billing?.linked && !billing.purchases_allowed && (
-              <Callout tone="info">
-                The account owner has not allowed purchases from this server yet.{" "}
-                {billing.manage_url && <a href={billing.manage_url} target="_blank" rel="noreferrer noopener">Allow them on app.sudoo.sh <ExternalLink /></a>}
+            {billing?.reason === "fingerprint_mismatch" && (
+              <Callout tone="danger">
+                This server is flagged (it reported from another machine), so it cannot buy plugins.{" "}
+                {billing.manage_url && <a href={billing.manage_url} target="_blank" rel="noreferrer noopener">Accept this machine on app.sudoo.sh <ExternalLink /></a>}
               </Callout>
             )}
-            {billing && !billing.payments_enabled && <Callout tone="warning">Payments are switched off on the marketplace right now.</Callout>}
-            {step === "paying" && (
-              <Callout tone="info">
+            {billing?.reason === "payments_disabled" && <Callout tone="warning">Payments are switched off on the marketplace right now.</Callout>}
+            {billing?.reason === "installation_suspended" && <Callout tone="danger">This panel is suspended on the marketplace. Contact Sudoo.sh support.</Callout>}
+            {step === "paying" && session && (
+              <Callout tone={session.status === "open" && session.reason ? "warning" : "info"}>
                 <div className="stack-sm">
-                  <div className="row"><span className="spinner" /> {purchase?.status === "processing" ? "The payment is being processed." : "Finish the payment in the other tab."} The plugin installs as soon as it is paid.</div>
-                  {purchase?.checkout_url && (
-                    <a href={purchase.checkout_url} target="_blank" rel="noreferrer noopener">Open the payment page again <ExternalLink /></a>
+                  <div className="row"><span className="spinner" /> {waiting} The plugin installs as soon as it is paid.</div>
+                  {session.url && (
+                    <a href={session.url} target="_blank" rel="noreferrer noopener">Open the payment page again <ExternalLink /></a>
                   )}
+                </div>
+              </Callout>
+            )}
+            {ended && step === "idle" && (
+              <Callout tone="warning">
+                <div className="stack-sm">
+                  <span>{ended}</span>
+                  <span className="small">Press the button again to start a new purchase.</span>
                 </div>
               </Callout>
             )}
@@ -447,7 +498,24 @@ function Catalogue({ installed, busy, onStarted }: { installed: InstalledPlugin[
   }, [q, type, tier, sort]);
   const { data: plugins, error, isPending } = useCatalog(query, usable);
   const { data: categories } = useCategories(usable);
+  const { data: recommended } = useRecommendations(usable);
   const byId = Object.fromEntries(installed.map((p) => [p.id, p]));
+  const browsing = !q && !type && !tier;
+  /** A suggested plugin as the sheet needs it: the catalogue's entry when loaded, else built from the suggestion. */
+  const openSuggestion = (pick: Recommendation) => {
+    const known = plugins?.find((p) => p.id === pick.plugin.id);
+    setOpen(
+      known ?? {
+        ...pick.plugin,
+        plans: [],
+        latest_version: null,
+        compatible_version: null,
+        installed_version: null,
+        license: null,
+        action: pick.plugin.tier === "free" ? "install" : "buy",
+      },
+    );
+  };
 
   if (!usable) return null;
   return (
@@ -473,6 +541,30 @@ function Catalogue({ installed, busy, onStarted }: { installed: InstalledPlugin[
           <option value="name">Name</option>
         </select>
       </div>
+      {browsing && !!recommended?.length && (
+        <section className="stack-sm rise" aria-labelledby="recommended">
+          <h2 id="recommended" className="row small"><Sparkles className="faint" /> Recommended</h2>
+          <div className="reco-row">
+            {recommended.map((pick) => (
+              <button key={pick.plugin.id} type="button" className="card link plugin-card" onClick={() => openSuggestion(pick)}>
+                <div className="pc-head">
+                  <PluginIcon plugin={pick.plugin} />
+                  <div className="pc-titles">
+                    <span className="pc-name truncate">{pick.plugin.name}</span>
+                    <PublisherBadge publisher={pick.plugin.publisher} />
+                  </div>
+                </div>
+                <span className="reco-why">{pick.reasons[0] ?? "Suggested for this server"}</span>
+                <div className="pc-foot">
+                  <Tag tone={pick.plugin.tier === "free" ? "positive" : undefined}>{pick.plugin.tier === "free" ? "Free" : "Paid"}</Tag>
+                  <span className="spacer" />
+                  <Countries plugin={pick.plugin} />
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       {isPending ? (
         <div className="plugin-grid">{[0, 1, 2].map((i) => <Skeleton key={i} height={168} />)}</div>
       ) : error ? (
@@ -498,11 +590,14 @@ const STATUS: Record<InstalledPlugin["status"], [string, string]> = {
   disabled: ["stopped", "Switched off"],
   modified: ["failed", "Files changed"],
   blocked: ["failed", "Refused by the marketplace"],
+  withheld: ["failed", "Withheld (server flagged)"],
   switched_off: ["paused", "Stopped (licence)"],
   unlicensed: ["paused", "No licence"],
 };
 const PHASE: Record<string, [string, "positive" | "caution" | "negative" | undefined]> = {
   active: ["Licensed", "positive"],
+  perpetual: ["Licensed for good", "positive"],
+  withheld: ["Withheld", "negative"],
   expiring: ["Ends soon", "caution"],
   grace: ["In grace period", "caution"],
   ended: ["Licence ended", "negative"],
@@ -567,7 +662,7 @@ function Installed({ plugins, busy, onStarted }: { plugins: InstalledPlugin[]; b
                 <tr key={p.id}>
                   <td>
                     <div className="row">
-                      <Monogram name={p.name} />
+                      <PluginIcon plugin={p} />
                       <div style={{ minWidth: 0 }}>
                         <div className="truncate">{p.name}</div>
                         <div className="xsmall faint"><PublisherBadge publisher={p.publisher} /></div>
@@ -590,6 +685,7 @@ function Installed({ plugins, busy, onStarted }: { plugins: InstalledPlugin[]; b
                       <div className="stack-sm" style={{ gap: 2, alignItems: "flex-start" }}>
                         {phase && <Tag tone={phase[1]}>{phase[0]}</Tag>}
                         {p.licence?.expires_at && <span className="xsmall faint">Ends {day(p.licence.expires_at)}{p.licence.grace_until ? ` · stops ${day(p.licence.grace_until)}` : ""}</span>}
+                        {p.licence?.perpetual && <span className="xsmall faint">One-time licence, no renewal</span>}
                       </div>
                     )}
                   </td>
@@ -644,9 +740,11 @@ function Installed({ plugins, busy, onStarted }: { plugins: InstalledPlugin[]; b
 
 const PURCHASE_STATUS: Record<string, [string, "positive" | "caution" | "negative" | undefined]> = {
   succeeded: ["Paid", "positive"],
+  open: ["Waiting for payment", "caution"],
   processing: ["Processing", "caution"],
-  checkout_required: ["Waiting for payment", "caution"],
+  checkout_required: ["Paying on Stripe", "caution"],
   failed: ["Failed", "negative"],
+  cancelled: ["Cancelled", undefined],
   expired: ["Expired", undefined],
 };
 
@@ -710,10 +808,10 @@ function Purchases() {
           <ShoppingBag />
           <div className="spacer">
             <h2>Purchases</h2>
-            <div className="sub">Every purchase asked for from this server, and how it ended</div>
+            <div className="sub">Every purchase asked for from this server (paid by the account owner on app.sudoo.sh), and how it ended</div>
           </div>
           {!!purchases?.length && (
-            <a className="btn sm" href="/api/v1/marketplace/purchases?format=csv" download>
+            <a className="btn sm" href="/api/v1/marketplace/checkout-sessions?format=csv" download>
               <FileDown /> Export CSV
             </a>
           )}
@@ -744,6 +842,7 @@ function Purchases() {
                           <Tag tone={tone}>{label}</Tag>
                           {p.reason && p.status !== "succeeded" && <span className="xsmall faint">{reasonText(p.reason)}</span>}
                           {p.receipt_number && <span className="xsmall faint mono">{p.receipt_number}</span>}
+                          {p.url && <a className="xsmall" href={p.url} target="_blank" rel="noreferrer noopener">Payment page <ExternalLink /></a>}
                         </div>
                       </td>
                       <td className="num">{money(p.amount_cents, p.currency)}</td>

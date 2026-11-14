@@ -351,7 +351,7 @@ from the Sudoo.sh marketplace on the **Plugins** page. The page, buying, licence
 | Step | What the panel does (`src/sudoo/plugin_manager.py`) |
 | :--- | :--- |
 | Download | A signed request to the hub; the package goes to a private folder |
-| Verify | SHA-256 as stated by the hub, the hub's Ed25519 signature over id, version and SHA-256, with a pinned hub key |
+| Verify | SHA-256 as stated by the hub, the hub's Ed25519 signature over id, version and SHA-256, with a hub key the panel trusts (active, or retiring before its end) |
 | Check | `manifest.json` names the same plugin and version; `min_sudoo_version`, `max_sudoo_version`, `sdk_version` (the panel offers SDK 0.1.0) and `requires` fit; no Python dependencies, compiled files, links or unsafe paths |
 | Unpack | `/opt/odoo/manager/plugins/<id>/<version>/package/` (root only); the package file is deleted |
 | Register | The manifest's `entry_points` are written as a small `dist-info` folder next to the package, and both folders are added to the **end** of Python's path when the backend starts. `plugins.load(group, name, settings)` then finds the plugin exactly like a built-in one: an installed mailer named `sendgrid` is chosen with `MAILER=sendgrid` |
