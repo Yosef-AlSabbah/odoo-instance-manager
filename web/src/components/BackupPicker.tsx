@@ -11,6 +11,7 @@ export const BACKUP_KIND: Record<BackupKind, string> = {
   deletion: "Before deletion",
   "before-restore": "Before a restore",
   "before-rollback": "Before a rollback",
+  "before-repair": "Before a repair",
 };
 
 /** The Odoo series of a version ("17.0+e" and "17.0" give "17.0", "saas~17.1" gives "17.1"), as the panel reads it. */

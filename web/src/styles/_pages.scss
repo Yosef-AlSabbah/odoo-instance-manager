@@ -427,3 +427,10 @@
   padding: var(--s2) var(--s5) var(--s4);
   .when { font-size: var(--text-20, 1.25rem); font-weight: 500; letter-spacing: -0.015em; margin: 2px 0; }
 }
+
+// what an instance's integrity check found changed outside the panel (Instance page, drift callout)
+.drift-list {
+  margin: var(--s2) 0 var(--s3);
+  padding-left: var(--s5);
+  li { overflow-wrap: anywhere; }
+}

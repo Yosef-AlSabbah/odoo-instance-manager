@@ -184,12 +184,18 @@ The menu:
 | **Update submodules** | Moves every submodule to the newest commit of its branch and restarts ([section 6](#6-submodules)). |
 | **Upgrade modules** | Like **Upgrade** in Odoo's Apps menu. Enter technical names separated by commas, or `all`. |
 | **Switch branch** | Moves the instance to another branch of the same repository, upgrades its modules and restarts. The database stays. |
+| **Update Odoo and PostgreSQL images** | Downloads the newest build of the instance's Odoo version and PostgreSQL (same versions) and restarts with them. Until then the instance keeps the exact images it was created with. |
 | **Pause** | Stops it to free memory now. It starts again on the next visit. |
 | **Switch off** | Stops it completely. Visitors see that it is switched off, and it does not start until someone clicks **Start**. |
 | **Delete** | Removes Odoo, its database and its files, after a backup. Type the instance's name to confirm. |
 
 **Back up now** and **Restore the latest** are on the **Backups** card of the **Overview** tab
 ([The Backups card](#the-backups-card)).
+
+**Changed outside the panel.** A red banner with this title means someone changed the instance's containers or
+files on the server directly, not through the panel. It lists what differs. Usually the panel puts its own
+configuration back by itself within a minute (you see a **Restore the panel's configuration** job in Activity) and
+the banner goes; otherwise the banner has a button for it. Tell your administrator either way.
 
 Each button and menu item is shown only to roles that may use it. While a job runs on the instance, the buttons
 wait: one job per instance at a time.

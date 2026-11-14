@@ -1,0 +1,13 @@
+Hello,
+
+Instance {{ instance }} was changed outside the Sudoo.sh panel:
+
+{% for item in items %}  - {{ item }}
+{% endfor %}
+
+{% if action == "restore" %}The panel puts its own configuration back as soon as nothing else runs on the instance (backing the database up first when its container is affected). Find out who made the change: only root and members of the docker group on the server can.{% else %}The panel only reports this (DRIFT_ACTION=warn). Undo the change, or restart the instance from the panel to recreate its containers from the panel's configuration.{% endif %}
+
+{% if panel_url %}Open Sudoo.sh: {{ panel_url }}
+{% endif %}
+--
+Sudoo.sh - Your Odoo instances, on your own server.

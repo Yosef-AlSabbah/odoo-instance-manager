@@ -52,6 +52,33 @@ class Settings(BaseSettings):
     postgres_image: str = Field("postgres:16", description="Docker image of each instance's database.")
     odoo_admin_password: str = Field("admin", description='Password of the Odoo user "admin" in new instances.')
 
+    # ------------------------------------------------------------------ instance containers (applied at their next start)
+    odoo_memory_limit: str = Field(
+        "2g",
+        pattern=r"^(0|\d+(\.\d+)?[bkmg])$",
+        description="Memory one instance's Odoo container may use, in Docker units (512m, 2g); 0: no limit.",
+    )
+    db_memory_limit: str = Field(
+        "1g",
+        pattern=r"^(0|\d+(\.\d+)?[bkmg])$",
+        description="Memory one instance's database container may use, in Docker units (512m, 1g); 0: no limit.",
+    )
+    odoo_cpu_limit: float = Field(2, ge=0, description="Processor cores one instance's Odoo may use; 0: no limit.")
+    db_cpu_limit: float = Field(2, ge=0, description="Processor cores one instance's database may use; 0: no limit.")
+    container_pids_limit: int = Field(
+        1024, ge=64, description="Processes and threads one instance container may run at the same time."
+    )
+    container_log_max_size: str = Field(
+        "10m", pattern=r"^\d+[kmg]$", description="Size of a container log file before it is rotated (10m)."
+    )
+    container_log_max_files: int = Field(3, ge=1, le=20, description="Rotated log files kept per container.")
+    drift_action: Literal["warn", "restore"] = Field(
+        "restore",
+        description='What happens when an instance\'s containers or files were changed outside the panel: "warn" '
+        '(report it) or "restore" (report it, then recreate Odoo and its database from the panel\'s own '
+        "configuration). Connectors are only ever reported.",
+    )
+
     # ------------------------------------------------------------------ Enterprise add-ons (plugin: enterprise_source)
     enterprise_source: str = Field(
         "folder", description='Where Enterprise add-ons come from: "folder", "git" or "none".'
@@ -172,6 +199,7 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ fixed intervals (not settings)
     pause_check_interval_seconds: int = 120
+    integrity_check_interval_seconds: int = 20  # instances/integrity.py
     expiry_check_interval_seconds: int = 600
     history_samples: int = 120  # the previous pages' short history (instances/monitor.py)
 
@@ -249,6 +277,14 @@ EDITABLE = (
     "odoo_image",
     "postgres_image",
     "odoo_admin_password",
+    "odoo_memory_limit",
+    "db_memory_limit",
+    "odoo_cpu_limit",
+    "db_cpu_limit",
+    "container_pids_limit",
+    "container_log_max_size",
+    "container_log_max_files",
+    "drift_action",
     "enterprise_path",
     "enterprise_git_url",
     "enterprise_git_branch",

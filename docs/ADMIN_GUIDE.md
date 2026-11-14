@@ -77,7 +77,7 @@ What it does, in order:
    plugins, starting Docker. Each question is answered **[y]es**, **[n]o** or **[a]ll** (yes to every later question).
    Without a terminal it stops and prints the command to run again with `--yes` (also `--allow-all`).
 3. **Downloads the images** `ghcr.io/sudoo-sh/sudoo-panel` and `ghcr.io/sudoo-sh/sudoo-web`, pinned by digest in the
-   installer, and checks their signatures when `cosign` is installed ([Security](SECURITY.md#11-releases-and-signatures)).
+   installer, and checks their signatures when `cosign` is installed ([Security](SECURITY.md#12-releases-and-signatures)).
 4. **Writes the files**: `/opt/odoo/{manager,instances,enterprise}` (root only), `/opt/odoo/manager/.env` from the
    release's settings template (values already there are kept), and `/opt/odoo/manager/compose.yaml`.
 5. **Starts** `sudoo-panel` and `sudoo-web` and waits until both are healthy.
@@ -241,7 +241,7 @@ Every setting belongs to one of three classes:
 
 | Class | Settings | How a change applies |
 | :--- | :--- | :--- |
-| **Now** | Almost everything: second factor requirement, session times, e-mail (including the mail password), limits, defaults for new instances, daily backups (`DAILY_BACKUPS`, `DAILY_BACKUP_TIME`, `TIMEZONE`), Odoo versions and images, Enterprise paths, update checks, webhook secret, contact, accent colour, `METRICS_INTERVAL_SECONDS`. | At once, when saved on the Settings page. |
+| **Now** | Almost everything: second factor requirement, session times, e-mail (including the mail password), limits, defaults for new instances, daily backups (`DAILY_BACKUPS`, `DAILY_BACKUP_TIME`, `TIMEZONE`), Odoo versions and images, instance containers (limits, `DRIFT_ACTION`), Enterprise paths, update checks, webhook secret, contact, accent colour, `METRICS_INTERVAL_SECONDS`. | At once, when saved on the Settings page. Container limits reach an instance when it next starts or restarts. |
 | **Restart** | The settings that choose plugins: `MAILER`, `SECOND_FACTORS`, `UPDATE_TRIGGERS`, `ENTERPRISE_SOURCE`, `AUTH`, `RATE_LIMITER`. | After **Restart the panel** (Settings, Plugins). The restart stops only the backend for a few seconds and is refused while jobs run. |
 | **.env only** | `ODOO_ROOT`, `DOCS_DIR`, `MEMORY_DIR`, `EXPOSURE`, `STORAGE`, `PUBLIC_HOST`, `PUBLIC_SCHEME`, all ports (`PANEL_PORT`, `API_PORT`, `EVENTS_PORT`, `GATEWAY_PORT_START`, `ODOO_PORT_START`, connector ports), `CONNECTOR_PREFIX`. | Edit `.env`, then `cd /opt/odoo/manager && docker compose up -d`. The Settings page lists them under **Server**, read only. |
 
@@ -392,10 +392,11 @@ Do not restart or recreate the connector containers by hand: their links would c
 ├── enterprise-git/<version>/                Enterprise add-ons downloaded by the git source
 ├── backups/                                 Odoo-format backup zips (mode 600)
 └── instances/<name>/
-    ├── .env                                 version, edition, ports, database, automation (mode 600);
-    │                                        MASTER_PASSWORD in it is ENCRYPTED
-    ├── docker-compose.yml                   the instance's two containers
-    ├── config/odoo.conf                     Odoo configuration; master password as a HASH only
+    ├── .env                                 version, edition, ports, database, automation, pinned images
+    │                                        (mode 600); MASTER_PASSWORD in it is ENCRYPTED
+    ├── docker-compose.yml                   the instance's two containers, written by the panel (mode 600)
+    ├── config/odoo.conf                     Odoo configuration; master password as a HASH only (mode 600,
+    │                                        owned by the Odoo image's user)
     └── addons/                              the repository, with its submodules
 ```
 
@@ -413,7 +414,62 @@ Do not restart or recreate the connector containers by hand: their links would c
 | Disk per container and volume | `docker system df -v` |
 
 Do not run `docker compose up` or `down` for an instance by hand: use the panel, which also keeps its gateway,
-connector and state in step.
+connector and state in step. A change made by hand to an instance's containers or files is found and, with
+`DRIFT_ACTION=restore`, undone (next section).
+
+### Hardened containers and changes made by hand
+
+Each instance's `odoo` and `db` containers run with no extra privileges, read-only system files, as few Linux
+capabilities as the images need, limits, rotated logs, images pinned by digest, and the database on an internal
+network only. What exactly, and what cannot be protected: [Security](SECURITY.md#10-instance-containers).
+
+**Limits.** Set on the Settings page (**Instance containers**) or in `.env`:
+
+| Setting | Default | Meaning |
+| :--- | :--- | :--- |
+| `ODOO_MEMORY_LIMIT` | `2g` | Memory of each instance's Odoo; `0` for no limit |
+| `ODOO_CPU_LIMIT` | `2` | Processor cores of each instance's Odoo; `0` for no limit |
+| `DB_MEMORY_LIMIT` | `1g` | Memory of each instance's PostgreSQL; `0` for no limit |
+| `DB_CPU_LIMIT` | `2` | Processor cores of each instance's PostgreSQL; `0` for no limit |
+| `CONTAINER_PIDS_LIMIT` | `1024` | Processes and threads per container |
+| `CONTAINER_LOG_MAX_SIZE`, `CONTAINER_LOG_MAX_FILES` | `10m`, `3` | Log rotation per container |
+
+A change reaches an instance the next time it starts or restarts through the panel; running instances are never
+restarted for it. The same is true of instances made before this version: they get the hardened containers at their
+next start or restart (the database container is recreated too; its data stays in its volume).
+
+**Images.** An instance keeps the exact Odoo and PostgreSQL images it was created with (pinned by digest in its
+`.env` as `ODOO_IMAGE_REF` and `DB_IMAGE_REF`). **Update Odoo and PostgreSQL images** in the instance's menu
+(`POST /api/v1/instances/<name>/actions/update-images`, permission `instances.operate`) downloads the same image names
+and tags again, pins the new digests and recreates the containers; a paused instance gets them at its next start.
+`ODOO_IMAGE` and `POSTGRES_IMAGE` apply to new instances only, so an instance never jumps to another PostgreSQL major
+version.
+
+**Changes made by hand (drift).** Every 20 seconds the panel compares each instance with what it applied. When
+something differs twice in a row:
+
+* the instance's page shows a red banner, **Changed outside the panel**, listing what differs, and the instance card
+  a tag of the same name;
+* the audit log gets "configuration changed outside the panel", with the details;
+* every super admin with an e-mail address gets a message (when e-mail is set up).
+
+What happens next is `DRIFT_ACTION`:
+
+| `DRIFT_ACTION` | Odoo and database containers, compose file, odoo.conf | Connector, `.env` |
+| :--- | :--- | :--- |
+| `restore` (default) | A job **Restore the panel's configuration** runs as soon as no other job runs on the instance: database backup first if its container is affected (kind "Before a repair", one kept per instance), the panel's files written back, strange containers stopped, affected containers recreated. A paused instance stays paused. Tried once per set of differences, again after 30 minutes if they remain. | Reported only. |
+| `warn` | Reported only; the banner has a **Restore the panel's configuration** button (`instances.operate`, action `repair`). | Reported only. |
+
+The banner goes away by itself once the instance matches again. A connector is never recreated by the panel (its
+link would change): undo the change by hand, or remove the connector and let the panel create a new one (new link).
+A hand-edited `.env` never changes the containers; **Restore the panel's configuration** accepts it as it is, after
+you have checked it.
+
+To see what the check sees, without changing anything:
+
+```bash
+docker exec sudoo-panel python -c "from sudoo.instances import integrity; print(*integrity.findings('<name>'), sep='\n')"
+```
 
 ---
 
@@ -496,6 +552,7 @@ part and count as `manual`.
 | `deletion` | Before every deletion, automatic or by hand. If it fails, the instance is not deleted. | Until someone deletes it. |
 | `before-restore` | At the start of every restore: the state just before it, offered as **Rollback**. | Only the latest per instance, for `ROLLBACK_HOURS` (24 by default). Removed when the instance is deleted. |
 | `before-rollback` | At the start of every rollback: the state just before it. | Only the latest per instance, for `ROLLBACK_HOURS`. Removed when the instance is deleted. |
+| `before-repair` | Before the panel recreates a database container that was changed outside the panel ([drift](#hardened-containers-and-changes-made-by-hand)). | Only the latest per instance. Removed when the instance is deleted. |
 
 This is Odoo's own backup format, with both the database and the filestore: restore it with **Restore Database**
 in any Odoo's database manager of the same version, or by hand (`createdb`, `psql -f dump.sql`, copy `filestore/`
@@ -722,7 +779,7 @@ anything; a ! is a warning. `sudo sudoo-install check` runs them all without cha
 | :--- | :--- |
 | "There is no terminal to ask, so nothing was changed." | Run the printed command (the same, with `--yes`). |
 | "Could not download ghcr.io/sudoo-sh/..." | Check access to `ghcr.io`; `docker pull` the image by hand to see Docker's message. |
-| "The signature of ... could not be verified" | Do not install it; report it ([Security](SECURITY.md#11-releases-and-signatures)). |
+| "The signature of ... could not be verified" | Do not install it; report it ([Security](SECURITY.md#12-releases-and-signatures)). |
 | "Sudoo.sh did not become healthy." | `docker logs sudoo-panel` names the problem (usually `.env`); fix it and run `sudo sudoo-install update`, or go back with `sudo sudoo-install update --rollback`. |
 | "These containers changed meanwhile" | The installer does not touch instances or connectors; the panel itself may have started or paused an instance. Check `docker ps`. |
 | "No earlier version is kept on this server." | A rollback needs an update made by this installer; install a given version with `update --version X`. |

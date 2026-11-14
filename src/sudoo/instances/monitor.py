@@ -5,7 +5,7 @@ so a measurement only reads the latest ones instead of starting Docker's slow on
 details of an instance (commit, repository) are read at most once a minute, and right after a job on it ends.
 
 Also keeps each Odoo's public address (web.base.url) in step with its connector, whose address changes when the
-connector restarts.
+connector restarts, and has integrity.py compare the instances with the panel's configuration.
 
 After every measurement it publishes live events (core/events.py): "metrics" with the new numbers, and "instance"
 for each instance whose status, code or address changed since the last one.
@@ -29,7 +29,7 @@ from sudoo.config import settings
 from sudoo.core import events, jobs
 from sudoo.core.shell import capture, succeeds
 from sudoo.core.state import STATE
-from sudoo.instances import metrics, odoo, store
+from sudoo.instances import integrity, metrics, odoo, store
 from sudoo.repos.gitrepo import git
 
 STATUS: dict[str, dict[str, Any]] = {}  # instance name -> latest measurements
@@ -320,6 +320,7 @@ def run_forever() -> None:
             collect()
             publish_changes()
             follow_public_addresses()
+            integrity.check_all()  # every INTEGRITY_CHECK_INTERVAL seconds: changes made outside the panel
         except Exception as exc:  # noqa: BLE001 - the monitor must keep running; the error is logged
             print("monitor error:", repr(exc), flush=True)
         time.sleep(settings.metrics_interval_seconds)

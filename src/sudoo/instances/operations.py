@@ -20,7 +20,7 @@ from sudoo.core import vault
 from sudoo.core.jobs import Job, JobError
 from sudoo.core.shell import capture
 from sudoo.core.state import STATE
-from sudoo.instances import backups, gateway, monitor, odoo, store
+from sudoo.instances import backups, gateway, integrity, monitor, odoo, store
 from sudoo.instances.store import compose
 from sudoo.repos.gitrepo import branch_on_github, changed_modules, git, module_folders, own_modules, snapshot
 
@@ -76,6 +76,7 @@ def _start_odoo(job: Job, name: str, restart: bool = False) -> None:
     Its connector is started too, in case it was stopped, so the instance keeps its public link.
     """
     refresh_addons_path(job, name)
+    integrity.apply(job, name)  # current settings and hardening; Compose recreates what changed
     exposure.ensure(name)
     job.run(compose(name, "up", "-d", "--remove-orphans"), timeout=900)
     if restart:
@@ -107,6 +108,7 @@ def create(job: Job, plan: dict[str, Any]) -> None:
         exposure.remove(name)
         shutil.rmtree(folder, ignore_errors=True)
         STATE.remove(name)
+        integrity.forget(name)
         raise
     finally:
         store.release_ports(plan["ports"])
@@ -162,15 +164,15 @@ def _create(job: Job, plan: dict[str, Any]) -> None:
             "DELETE_AFTER_DAYS": plan["delete_after_days"],  # 0: keep until deleted by hand
             "CREATED_AT": int(time.time()),
             "CREATED_BY": plan.get("created_by", ""),
+            "ENTERPRISE_FOLDER": str(enterprise_folder or ""),
         },
     )
     odoo.write_config(name, db, db_password, master_password)
-    (store.folder(name) / "docker-compose.yml").write_text(odoo.compose_file(name, enterprise_folder))
     refresh_addons_path(job, name)
     STATE.update(name, last_visit=time.time(), paused=False, switched_off=False)
 
     job.step(f"Downloading Odoo {version} (the first time can take a few minutes)")
-    job.run(compose(name, "pull"), timeout=1800)
+    integrity.apply(job, name, pull=True)  # images pinned by digest, hardened compose file, protected files
 
     job.step("Starting the database")
     job.run(compose(name, "up", "-d", "db"), timeout=300)
@@ -290,6 +292,7 @@ def delete(job: Job, name: str) -> None:
     job.step("Removing the instance folder")
     shutil.rmtree(store.folder(name))
     STATE.remove(name)
+    integrity.forget(name)
     backups.remove_daily(name)  # the backup above is newer
 
 
@@ -452,6 +455,75 @@ def switch_off(job: Job, name: str) -> None:
     job.run(compose(name, "stop"), timeout=300)
     STATE.update(name, switched_off=True, paused=False)
     monitor.mark_stopped(name)
+
+
+# --------------------------------------------------------------------------- configuration and images
+
+
+def repair(job: Job, name: str) -> None:
+    """Put the panel's own configuration back after the instance was changed outside the panel (integrity.py):
+    back up the database first when its container is affected, write the panel's files back, stop containers that
+    pretend to belong to the instance, and recreate the affected containers. A paused instance stays paused."""
+    found = integrity.findings(name)
+    restorable = [finding for finding in found if finding.restorable]
+    job.expect(3 + any(finding.part == "db" for finding in restorable))
+    job.step("Comparing the instance with the panel's configuration")
+    for finding in found:
+        job.write(f"- {finding.text}\n")
+    if any(finding.part == "env" for finding in found):
+        integrity.accept_env(name)
+        job.note(
+            "The .env file was changed by hand. The values that shape the containers (images, ports, passwords) "
+            "still come from the panel's own record; the rest of the file is used as it is now.",
+            "warning",
+        )
+    if not restorable:
+        job.note("Nothing else to restore: the containers and files match the panel's configuration.")
+        return
+    services = {finding.part for finding in restorable} & {"odoo", "db"}
+    if any(finding.part == "files" for finding in restorable):
+        services = {"odoo", "db"}  # the files shape both containers
+    if any(finding.part == "db" for finding in restorable):
+        job.step("Backing up the database first")
+        saved = backups.create(job, name, "before-repair")
+        job.note(f"Backup taken before the repair: {', '.join(path.name for path in saved)}")
+    job.step("Putting the panel's configuration back")
+    put_back = integrity.rewrite_if_changed(name)
+    integrity.protect(name, integrity.inputs(name).get("ODOO_USER", ""))
+    stopped = integrity.stop_strangers(job, name)
+    if stopped:
+        job.note(
+            f"Stopped containers that pretended to belong to this instance (kept for review): {', '.join(stopped)}"
+        )
+    paused = _paused(name)
+    if services:
+        job.step("Recreating " + " and ".join(sorted(services)) + " from the panel's configuration")
+        if paused:
+            job.run(compose(name, "create", "--force-recreate", *sorted(services)), timeout=600)
+        else:
+            job.run(compose(name, "up", "-d", "--force-recreate", "--remove-orphans", *sorted(services)), timeout=900)
+            _wait_until_ready(job, name)
+    left = [finding.text for finding in integrity.findings(name) if finding.restorable]
+    if left:
+        job.note(f"Still different after the repair: {'; '.join(left)}", "warning")
+    from sudoo.core import audit
+
+    audit.record("system", None, "configuration restored", name, ok=not left,
+                 detail="; ".join([*put_back, *stopped, *sorted(services)]))  # fmt: skip
+
+
+def update_images(job: Job, name: str) -> None:
+    """Download the instance's Odoo and PostgreSQL images again (same names and tags), pin the new digests and
+    recreate the containers with them. A paused instance gets them when it next starts."""
+    job.expect(3)
+    job.step("Downloading the images")
+    paused = _paused(name)
+    integrity.apply(job, name, pull=True)
+    if paused:
+        job.note("The instance stays paused and uses the new images when someone opens it.")
+        return
+    job.step("Starting Odoo with the new images")
+    _start_odoo(job, name)
 
 
 # --------------------------------------------------------------------------- code updates

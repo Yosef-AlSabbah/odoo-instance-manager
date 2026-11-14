@@ -68,9 +68,12 @@ def master_password_label(name: str) -> str:
 
 def write_env(name: str, env: Mapping[str, object]) -> None:
     """Write the instance's .env file, readable by its owner only (it holds the database password)."""
+    from sudoo.instances import integrity
+
     path = folder(name) / ".env"
-    path.touch(mode=0o600)
-    path.write_text("".join(f"{key}={value}\n" for key, value in env.items()))
+    with integrity.writing(name, ".env"):
+        path.touch(mode=0o600)
+        path.write_text("".join(f"{key}={value}\n" for key, value in env.items()))
 
 
 def update_env(name: str, **values: object) -> None:
@@ -79,10 +82,25 @@ def update_env(name: str, **values: object) -> None:
     write_env(name, env)
 
 
+_STARTING = ("up", "run", "create", "start", "restart")  # Compose commands that create or start containers
+
+
 def compose(name: str, *args: str) -> list[str]:
-    """`docker compose` command for the instance's project."""
+    """`docker compose` command for the instance's project.
+
+    For an instance the panel has hardened (instances/integrity.py), the compose file and odoo.conf are first put
+    back if someone changed them, before any command that creates or starts containers; the project name is fixed
+    and the .env file is not read (the compose file holds every value, and .env could otherwise rename the project
+    or switch Compose features on)."""
+    from sudoo.instances import integrity
+
     path = folder(name)
-    return ["docker", "compose", "--project-directory", str(path), "-f", str(path / "docker-compose.yml"), *args]
+    command = ["docker", "compose", "--project-directory", str(path), "-f", str(path / "docker-compose.yml")]
+    if integrity.hardened(name):
+        if args and args[0] in _STARTING:
+            integrity.rewrite_if_changed(name)
+        command += ["-p", f"odoo-{name}", "--env-file", "/dev/null"]
+    return [*command, *args]
 
 
 def container(name: str, service: str) -> str:

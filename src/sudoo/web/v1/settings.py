@@ -27,7 +27,12 @@ from .responses import no_content, ok
 
 blueprint = Blueprint("settings", __name__)
 
-_FIXED = {"pause_check_interval_seconds", "expiry_check_interval_seconds", "history_samples"}
+_FIXED = {
+    "pause_check_interval_seconds",
+    "expiry_check_interval_seconds",
+    "integrity_check_interval_seconds",
+    "history_samples",
+}
 _HIDDEN = {"docs_dir", "memory_dir"}
 
 

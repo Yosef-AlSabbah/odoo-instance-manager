@@ -246,6 +246,7 @@ Enterprise instance.
 | `deletion` | Before an instance is deleted | Until deleted |
 | `before-restore` | At the start of a `restore` action | Only the latest per instance, for `ROLLBACK_HOURS`; removed with the instance |
 | `before-rollback` | At the start of a `rollback` action | Only the latest per instance, for `ROLLBACK_HOURS`; removed with the instance |
+| `before-repair` | Before the panel recreates a database container that was changed outside the panel (`repair`) | Only the latest per instance; removed with the instance |
 
 To restore a backup into an instance (its own, or another instance's), use the `restore` action; to start a new
 instance from one, `from_backup` of `POST /instances` ([below](#instances-jobs-and-actions-in-detail)).
@@ -416,6 +417,8 @@ Actions (`POST /instances/<name>/actions/<action>`); each needs its own permissi
 | `remove-submodule` | Remove a submodule | `instances.operate` | `{"path": "oca/web"}` |
 | `switch-branch` | Switch branch | `instances.operate` | `{"branch": "main"}` |
 | `backup` | Back up now | `instances.operate` | `{}` |
+| `update-images` | Download the instance's Odoo and PostgreSQL images again (same names and tags), pin the new digests, recreate the containers | `instances.operate` | `{}` |
+| `repair` | Restore the panel's configuration after a change made outside the panel (also started on its own with `DRIFT_ACTION=restore`) | `instances.operate` | `{}` |
 | `restore` | Restore a backup: replaces the database and the filestore | `instances.restore` (and `backups.manage` for another instance's backup) | `{}` for the latest, or `{"file": "<backup file name>"}` |
 | `rollback` | Go back to the state before the last restore, while it is kept (`ROLLBACK_HOURS`) | `instances.restore` | `{}` |
 | `delete` | Delete, after a backup (same as `DELETE /instances/<name>`) | `instances.delete` | `{"confirm": "<name>"}` |

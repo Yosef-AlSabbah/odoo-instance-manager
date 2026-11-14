@@ -20,6 +20,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`--purge`). An update replaces only `sudoo-panel` and `sudoo-web`; instances and connectors are never touched.
 - **Manual installation** with the release's `compose.yaml` (docs/ADMIN_GUIDE.md), and **from source** with
   `docker compose build` (README).
+- **Hardened instance containers:** each instance's `odoo` and `db` run with `no-new-privileges`, every Linux
+  capability dropped except the few PostgreSQL's entry point needs (Odoo gets none), read-only system files (only
+  the data volumes and in-memory `/tmp` are writable; `config/` and the add-ons are mounted read-only), an init
+  process, rotated logs, process, memory and processor limits (`ODOO_MEMORY_LIMIT`, `ODOO_CPU_LIMIT`,
+  `DB_MEMORY_LIMIT`, `DB_CPU_LIMIT`, `CONTAINER_PIDS_LIMIT`, `CONTAINER_LOG_MAX_SIZE`, `CONTAINER_LOG_MAX_FILES`;
+  Settings, Instance containers), and the database on an internal network only (no port, no way out, not
+  reachable from other instances or, on Docker 28+, from the server). Images are pinned by digest at creation;
+  **Update Odoo and PostgreSQL images** (action `update-images`) refreshes them. The compose file is rendered from
+  a fixed list of keys, refuses anything else (extra keys, more capabilities, ports off `127.0.0.1`, the Docker
+  socket, writable folders from the server), holds its values literally and is run without `.env`. Instance folders
+  are mode 700, `.env` and the compose file 600, `odoo.conf` 600 and owned by the Odoo image's user. Existing
+  instances get all this the next time they start or restart through the panel; running ones are not restarted for
+  it. New Cloudflare connectors are hardened too; existing ones are left as they are (their links would change).
+- **Changes made by hand are found and undone:** every 20 seconds the panel compares each instance's files and
+  containers (`docker inspect`: image, capabilities, privileges, mounts, networks, ports, environment, labels,
+  limits, restart policy) with what it applied, and looks for containers that pretend to belong to an instance. A
+  difference goes to the audit log, shows as a **Changed outside the panel** banner and is e-mailed to super admins.
+  With `DRIFT_ACTION=restore` (default) the panel then backs up the database (new backup kind `before-repair`) when
+  its container is affected, writes its own files back, stops strange containers and recreates the affected ones;
+  `warn` only reports, with a **Restore the panel's configuration** button (action `repair`). Connectors and `.env`
+  are only ever reported. See [Security](docs/SECURITY.md#10-instance-containers).
 
 - **Daily backups:** once a day (`DAILY_BACKUP_TIME`, default 00:00, in `TIMEZONE`), every instance that was used
   since its last daily backup is backed up. Each instance keeps only its latest daily backup; they go when the

@@ -18,6 +18,8 @@ Kinds (files of earlier versions have no kind and count as "manual"):
     before-rollback the state an instance had before a rollback; kept like before-restore, so a rollback can be
                     undone by hand, but never offered as a rollback itself (a rollback never replaces the snapshot
                     it restores)
+    before-repair   taken before the panel recreated a database container that was changed by hand
+                    (integrity.py); each instance keeps only its latest one
 
 The database container is started for a backup if the instance is paused; the instance's state is not changed
 otherwise. restore() puts a backup back: the database is replaced and so is the filestore. A backup can be put into
@@ -49,12 +51,12 @@ from sudoo.instances import odoo, store
 
 FILE_RE = re.compile(
     r"^(?P<instance>[a-z0-9][a-z0-9-]{0,30})__(?P<db>[a-z0-9_]{1,63})__(?P<stamp>\d{8}-\d{6})"
-    r"(?:__(?P<kind>manual|daily|deletion|before-restore|before-rollback))?\.zip$"
+    r"(?:__(?P<kind>manual|daily|deletion|before-restore|before-rollback|before-repair))?\.zip$"
 )
-KINDS = ("manual", "daily", "deletion", "before-restore", "before-rollback")
+KINDS = ("manual", "daily", "deletion", "before-restore", "before-rollback", "before-repair")
 RESTORABLE = ("manual", "daily", "deletion")  # what "Restore the latest backup" chooses from
 SNAPSHOTS = ("before-restore", "before-rollback")  # safety copies, removed ROLLBACK_HOURS after they were taken
-_KEEP_ONE = ("daily", *SNAPSHOTS)  # kinds of which each instance keeps only the latest
+_KEEP_ONE = ("daily", "before-repair", *SNAPSHOTS)  # kinds of which each instance keeps only the latest
 
 
 def create(job: Job, name: str, kind: str = "manual") -> list[Path]:
@@ -76,7 +78,8 @@ def create(job: Job, name: str, kind: str = "manual") -> list[Path]:
 
 
 def _database_up(job: Job, name: str) -> None:
-    job.run(store.compose(name, "up", "-d", "db"), timeout=300)
+    # --no-recreate: a backup starts the database as it is; containers change only when the instance starts
+    job.run(store.compose(name, "up", "-d", "--no-recreate", "db"), timeout=300)
     if not odoo.wait_for_database(name, timeout=60):
         raise JobError("the database did not start")
 
@@ -310,7 +313,12 @@ def restore(job: Job, name: str, backup: dict[str, Any], db: str | None = None) 
             tar_file.seek(0)
             target = f"/var/lib/odoo/filestore/{db}"
             script = f"rm -rf {target} && mkdir -p {target} && tar -x -C {target} && chown -R odoo: {target}"
-            command = store.compose(name, "run", "--rm", "--no-deps", "-T", "--user", "root", "--entrypoint", "sh")
+            # root in a short-lived container, with only what replacing files owned by Odoo's user needs (the
+            # instance's containers drop every capability otherwise)
+            capabilities = [arg for cap in odoo.FILESTORE_CAPABILITIES for arg in ("--cap-add", cap)]
+            command = store.compose(
+                name, "run", "--rm", "--no-deps", "-T", "--user", "root", *capabilities, "--entrypoint", "sh"
+            )
             _feed([*command, "odoo", "-c", script], tar_file, "filestore")
 
 

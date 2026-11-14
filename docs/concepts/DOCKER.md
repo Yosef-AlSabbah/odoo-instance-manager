@@ -44,34 +44,49 @@ loses its data, because the data lives in volumes. Deleting an instance removes 
 ## 3. Docker Compose: one instance, one file
 
 Docker Compose describes several containers that belong together in one file. Every instance has its own
-`docker-compose.yml`, written by the panel:
+`docker-compose.yml`, written by the panel (shortened here; the real file repeats the hardening for both services
+and writes every value literally):
 
 ```yaml
 name: odoo-sales-main
 
 services:
   db:                                   # PostgreSQL, the instance's database
-    image: postgres:16
-    environment:
-      POSTGRES_USER: odoo
-      POSTGRES_PASSWORD: ${DB_PASSWORD} # from the instance's .env
+    image: postgres:16@sha256:...       # pinned by digest when the instance was created
+    read_only: true                     # system files cannot be changed
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]                     # every Linux capability dropped...
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID, KILL]   # ...but what the image's start needs
+    tmpfs: [/var/run/postgresql, /tmp]  # in-memory folders it may write
+    networks: [backend]                 # internal network only: no port, no way out
     volumes:
       - db-data:/var/lib/postgresql/data
 
   odoo:                                 # Odoo itself, the official image
-    image: odoo:${ODOO_VERSION}
-    depends_on: [db]
+    image: odoo:18.0@sha256:...
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]                     # Odoo runs as the user "odoo" and needs none
+    mem_limit: 2g                       # limits from the panel's settings
+    pids_limit: 1024
     ports:
-      - "127.0.0.1:${ODOO_PORT}:8069"   # reachable from the server only
+      - "127.0.0.1:28069:8069"          # reachable from the server only
+    networks: [backend, default]
     volumes:
       - odoo-data:/var/lib/odoo         # attachments
-      - ./config:/etc/odoo              # odoo.conf
-      - ./addons:/mnt/extra-addons      # the GitHub repository
+      - /opt/odoo/instances/sales-main/config:/etc/odoo:ro            # odoo.conf, read-only
+      - /opt/odoo/instances/sales-main/addons:/mnt/extra-addons:ro    # the GitHub repository, read-only
+
+networks:
+  backend: {internal: true}
 
 volumes:
   db-data:
   odoo-data:
 ```
+
+The panel checks the containers against this file every 20 seconds and undoes changes made by hand; see
+[Security](../SECURITY.md#10-instance-containers).
 
 With this file, one command does a whole job:
 

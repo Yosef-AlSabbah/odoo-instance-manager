@@ -44,6 +44,7 @@ def test_every_setting_is_documented() -> None:
     fixed = {
         "pause_check_interval_seconds",
         "expiry_check_interval_seconds",
+        "integrity_check_interval_seconds",
         "history_samples",
     }
     documented = (Path(__file__).resolve().parent.parent / "docs" / "CONFIGURATION.md").read_text()

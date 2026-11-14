@@ -72,9 +72,18 @@ class CloudflareQuickTunnel:
         return result
 
     def _run_command(self, target: Target) -> list[str]:
+        """A new connector: host network (it reaches the gateway on 127.0.0.1), and otherwise as little as
+        possible: no capabilities, no new privileges, read-only system files, limits, rotated logs. Connectors that
+        exist already are never recreated (their address would change); they get this at their next creation."""
         return [
             "docker", "run", "-d", "--name", self.container(target), "--restart", "unless-stopped",
-            "--network", "host", "--label", "sudoo=connector", self.settings.cloudflared_image,
+            "--network", "host", "--label", "sudoo=connector",
+            "--label", "sh.sudoo.managed=true", "--label", "sh.sudoo.service=connector",
+            "--label", f"sh.sudoo.instance={target.name}",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--read-only", "--tmpfs", "/tmp",
+            "--pids-limit", "256", "--memory", "256m", "--init",
+            "--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=3",
+            self.settings.cloudflared_image,
             "tunnel", "--no-autoupdate", "--metrics", f"127.0.0.1:{target.env[STATUS_PORT_KEY]}",
             "--url", f"http://127.0.0.1:{target.port}",
         ]  # fmt: skip

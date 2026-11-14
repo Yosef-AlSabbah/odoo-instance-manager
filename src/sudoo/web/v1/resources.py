@@ -70,6 +70,14 @@ def rollback(name: str) -> dict[str, Any] | None:
     }
 
 
+def drift(found: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Changes made to the instance outside the panel (instances/integrity.py), or None: when they were found, what
+    they are, and whether the panel puts its configuration back ("restore") or only reports them ("warn")."""
+    if not found:
+        return None
+    return {"detected_at": iso(found.get("found_at")), "items": list(found.get("items", [])), "action": found["action"]}
+
+
 def backup_resource(backup: dict[str, Any]) -> dict[str, Any]:
     """A backup as GET /api/v1/backups lists it: the file's facts and what its manifest says."""
     return backup | backups.details(backup["file"])
@@ -105,6 +113,7 @@ def instance_resource(name: str, full: bool = False) -> dict[str, Any]:
         "usage": _usage(name),
         "uptime": measured.get("uptime") or None,
         "gateway_error": gateway.LISTENER_ERRORS.get(name),
+        "drift": drift(state.get("drift")),
         "created_at": iso(env["CREATED_AT"]),
         "created_by": env.get("CREATED_BY") or None,
         "last_visit_at": iso(last_visit),

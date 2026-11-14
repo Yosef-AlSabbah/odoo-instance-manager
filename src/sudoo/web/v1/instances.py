@@ -58,6 +58,8 @@ ACTIONS = {
     "remove-submodule": ("Remove submodule", "submodule", "instances.operate"),
     "switch-branch": ("Switch branch", "update", "instances.operate"),
     "backup": ("Back up", "backup", "instances.operate"),
+    "update-images": ("Update Odoo and PostgreSQL images", "update", "instances.operate"),
+    "repair": ("Restore the panel's configuration", "repair", "instances.operate"),
     "restore": ("Restore a backup", "restore", "instances.restore"),
     "rollback": ("Roll back the restore", "restore", "instances.restore"),
     "delete": ("Delete instance", "delete", "instances.delete"),
@@ -263,6 +265,8 @@ def _job_for(action: str, name: str, data: Mapping[str, Any]) -> tuple[Callable[
         "pause": (operations.pause, (name,)),
         "backup": (operations.backup, (name,)),
         "switch-off": (operations.switch_off, (name,)),
+        "update-images": (operations.update_images, (name,)),
+        "repair": (operations.repair, (name,)),
     }
     if action in simple:
         return simple[action]

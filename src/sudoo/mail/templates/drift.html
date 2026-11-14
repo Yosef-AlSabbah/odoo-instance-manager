@@ -1,0 +1,23 @@
+{#- Sent to every super admin when an instance's containers or files were changed outside the panel (integrity.py). -#}
+{% extends "layout.html" %}
+{% block content %}
+<p style="margin:0 0 12px 0;">Hello,</p>
+<p style="margin:0 0 16px 0;">Instance <b>{{ instance }}</b> was changed outside the Sudoo.sh panel:</p>
+<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="font-size:13px; background-color:#F8F9FA; border-radius:6px;">
+  {% for item in items %}
+  <tr><td style="padding:{{ '10px' if loop.first else '2px' }} 14px {{ '10px' if loop.last else '2px' }} 14px; color:#212529; font-family:Menlo, Consolas, 'Courier New', monospace; font-size:12px;">{{ item }}</td></tr>
+  {% endfor %}
+</table>
+<p style="margin:16px 0 0 0;">
+{% if action == "restore" %}
+The panel puts its own configuration back as soon as nothing else runs on the instance, backing the database up first when its container is affected. Find out who made the change: only root and members of the docker group on the server can.
+{% else %}
+The panel only reports this (DRIFT_ACTION=warn). Undo the change, or restart the instance from the panel to recreate its containers from the panel's configuration.
+{% endif %}
+</p>
+{% if panel_url %}
+<p style="margin:16px 0 0 0; text-align:center;">
+  <a href="{{ panel_url }}" style="display:inline-block; background-color:{{ accent | default('#714B67') }}; border-radius:5px; padding:8px 18px; font-size:13px; color:#FFFFFF; text-decoration:none;">Open Sudoo.sh</a>
+</p>
+{% endif %}
+{% endblock %}

@@ -50,6 +50,7 @@ export function InstanceCard({ instance }: { instance: Instance }) {
           <Tag mono>{instance.odoo.version}</Tag>
           <Tag>{instance.odoo.edition === "enterprise" ? "Enterprise" : "Community"}</Tag>
           {instance.git.branch_deleted_on_github && <Tag tone="negative">Branch deleted</Tag>}
+          {instance.drift && <Tag tone="negative">Changed outside the panel</Tag>}
         </div>
         {instance.current_job ? (
           <RunningJob id={instance.current_job.id} />

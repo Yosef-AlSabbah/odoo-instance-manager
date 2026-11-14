@@ -36,14 +36,15 @@ reset with **Use .env**.
 
 1. [Contact](#contact)
 2. [Odoo](#odoo)
-3. [Enterprise add-ons (plugin)](#enterprise-add-ons-plugin)
-4. [Exposure (plugin)](#exposure-plugin)
-5. [Code updates (plugins)](#code-updates-plugins)
-6. [Storage, sign-in and e-mail (plugins)](#storage-sign-in-and-e-mail-plugins)
-7. [Limits](#limits)
-8. [Ports](#ports)
-9. [Behaviour](#behaviour)
-10. [Locations](#locations)
+3. [Instance containers](#instance-containers)
+4. [Enterprise add-ons (plugin)](#enterprise-add-ons-plugin)
+5. [Exposure (plugin)](#exposure-plugin)
+6. [Code updates (plugins)](#code-updates-plugins)
+7. [Storage, sign-in and e-mail (plugins)](#storage-sign-in-and-e-mail-plugins)
+8. [Limits](#limits)
+9. [Ports](#ports)
+10. [Behaviour](#behaviour)
+11. [Locations](#locations)
 
 ---
 
@@ -67,6 +68,31 @@ reset with **Use .env**.
 | `ODOO_IMAGE` | str | `odoo` | **live** | Docker image of Odoo; the tag is the Odoo version. Used for instances created after the change. |
 | `POSTGRES_IMAGE` | str | `postgres:16` | **live** | Docker image of each instance's database. Used for instances created after the change. |
 | `ODOO_ADMIN_PASSWORD` | str | `admin` | **live** | Password of the Odoo user "admin" in new instances. Secret: write-only on the Settings page. |
+
+An instance keeps the images it was created with, pinned by digest; **Update Odoo and PostgreSQL images** on its
+page refreshes them (same names and tags). See [Administrator guide](ADMIN_GUIDE.md#hardened-containers-and-changes-made-by-hand).
+
+---
+
+## Instance containers
+
+Limits of each instance's `odoo` and `db` containers, and what happens when they are changed outside the panel.
+Changed limits reach an instance the next time it starts or restarts through the panel; running instances are not
+restarted for them. What the containers are allowed to do: [Security](SECURITY.md#10-instance-containers).
+
+| Setting | Type | Default | Applies | Meaning |
+| :--- | :--- | :--- | :--- | :--- |
+| `ODOO_MEMORY_LIMIT` | str | `2g` | **live** | Memory one instance's Odoo container may use, in Docker units (`512m`, `2g`); `0`: no limit. |
+| `ODOO_CPU_LIMIT` | float | `2` | **live** | Processor cores one instance's Odoo may use; `0`: no limit. |
+| `DB_MEMORY_LIMIT` | str | `1g` | **live** | Memory one instance's database container may use, in Docker units; `0`: no limit. |
+| `DB_CPU_LIMIT` | float | `2` | **live** | Processor cores one instance's database may use; `0`: no limit. |
+| `CONTAINER_PIDS_LIMIT` | int | `1024` | **live** | Processes and threads one instance container may run at the same time (at least 64). |
+| `CONTAINER_LOG_MAX_SIZE` | str | `10m` | **live** | Size of a container's log file before it is rotated (`k`, `m` or `g`). |
+| `CONTAINER_LOG_MAX_FILES` | int | `3` | **live** | Rotated log files kept per container (1 to 20). |
+| `DRIFT_ACTION` | str | `restore` | **live** | When an instance's containers or files were changed outside the panel: `warn` reports it (audit log, banner, e-mail to super admins); `restore` reports it and then recreates Odoo and its database from the panel's own configuration, backing the database up first when its container is affected. Connectors and `.env` are only ever reported. |
+
+The memory of an in-memory `/tmp` counts towards the container's memory limit; very large uploads to Odoo need room
+there.
 
 ---
 

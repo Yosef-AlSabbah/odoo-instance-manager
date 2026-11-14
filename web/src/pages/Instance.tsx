@@ -2,6 +2,7 @@ import {
   Activity,
   ArrowUpRight,
   Code2,
+  Container,
   Database,
   Download,
   DownloadCloud,
@@ -21,6 +22,7 @@ import {
   RotateCw,
   ScrollText,
   Settings2,
+  ShieldCheck,
   Trash2,
   Zap,
 } from "lucide-react";
@@ -155,6 +157,9 @@ export function InstancePage() {
                       <button disabled={busy || !instance.git.repository} onClick={item(() => setDialog("branch"))}>
                         <GitBranch /> Switch branch…
                       </button>
+                      <button disabled={busy} onClick={item(() => act("update-images", "Update Odoo and PostgreSQL images"))}>
+                        <Container /> Update Odoo and PostgreSQL images
+                      </button>
                       <hr />
                       {!asleep && (
                         <button disabled={busy} onClick={item(() => act("pause", "Pause"))}>
@@ -203,6 +208,24 @@ export function InstancePage() {
         </Callout>
       )}
       {instance.gateway_error && <Callout tone="danger">{instance.gateway_error}</Callout>}
+      {instance.drift && (
+        <Callout tone="danger">
+          <b>Changed outside the panel {instance.drift.detected_at ? ago(instance.drift.detected_at) : ""}.</b>{" "}
+          {instance.drift.action === "restore"
+            ? "The panel puts its own configuration back as soon as nothing else runs here, backing the database up first when its container is affected."
+            : "The panel only reports this. Undo the change, or restore the panel's configuration."}
+          <ul className="drift-list mono xsmall">
+            {instance.drift.items.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+          {instance.drift.action === "warn" && can("instances.operate") && (
+            <Button icon={<ShieldCheck />} disabled={busy} onClick={() => act("repair", "Restore the panel's configuration")}>
+              Restore the panel's configuration
+            </Button>
+          )}
+        </Callout>
+      )}
 
       <nav className="tabs">
         {TABS.filter((t) => !t.permission || can(t.permission)).map((t) => (
