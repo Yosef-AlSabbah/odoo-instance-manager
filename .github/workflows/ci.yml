@@ -43,11 +43,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Copy documentation into the build context
-        # The image serves README.md and docs/ inside the panel; install.sh places them in documentation/.
-        run: mkdir documentation && cp -r README.md docs documentation/
-      - name: Build
+      - name: Build the panel's image (the documentation is copied in by the Dockerfile)
         run: docker build --tag sudoo:ci .
+      - name: The image serves the documentation
+        run: docker run --rm --entrypoint sh sudoo:ci -c 'test -f /app/documentation/README.md && test -f /app/documentation/docs/ADMIN_GUIDE.md'
       - name: Build the web app's image
         run: docker build --tag sudoo-web:ci web
 
@@ -67,3 +66,19 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Type-check and build
         run: npm run build
+
+  edge:
+    name: Publish the edge images (main)
+    # every push to main that passes the checks: ghcr.io/sudoo-sh/sudoo-{panel,web}:edge and :sha-<short commit>,
+    # for servers that follow main (sudoo-install update --version edge)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [checks, tests, docker, web]
+    uses: ./.github/workflows/images.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      tags: |
+        type=edge,branch=main
+        type=sha,prefix=sha-,format=short

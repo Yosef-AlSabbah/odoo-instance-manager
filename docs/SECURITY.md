@@ -18,6 +18,7 @@
 9. [Roles and the audit log](#9-roles-and-the-audit-log)
 10. [Instance containers](#10-instance-containers)
 11. [Checklist for the administrator](#11-checklist-for-the-administrator)
+12. [Releases and signatures](#12-releases-and-signatures)
 
 ---
 
@@ -422,3 +423,38 @@ root, and keep SSH access limited.
 - [ ] Keep `DRIFT_ACTION=restore`, give super admins an e-mail address, and look into every "changed outside the
       panel" message: only root or the `docker` group can cause one.
 - [ ] Keep the `docker` group to administrators trusted with root.
+
+---
+
+## 12. Releases and signatures
+
+Servers run prebuilt images; nobody builds or downloads the source code to install. How you can check what you run:
+
+| What | How it is protected |
+| :--- | :--- |
+| Images `ghcr.io/sudoo-sh/sudoo-panel` and `ghcr.io/sudoo-sh/sudoo-web` | Built by GitHub Actions (`.github/workflows/images.yml`) from the tagged commit, for linux/amd64 and linux/arm64, with an SBOM and a provenance attestation, and signed by digest with Sigstore keyless signing (cosign): the certificate names the workflow and the tag. |
+| `compose.yaml` of a release | Names both images by digest, so a tag that moves later cannot change what a server runs. Signed by the release workflow (`compose.yaml.sigstore.json`) and listed in `SHA256SUMS`. |
+| `sudoo-install.sh` | Pins the same digests. Checked (shellcheck, tests, a dry run against the release's images) and attached to the release with its SHA-256 in `SHA256SUMS`, and a Sigstore bundle (`sudoo-install.sh.sigstore.json`) when it is signed. When it updates to another version it downloads that release's installer and runs it only if the SHA-256 matches. |
+
+Check an image yourself with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) 3 or newer (the
+digest is in the release's `compose.yaml`):
+
+```bash
+cosign verify ghcr.io/sudoo-sh/sudoo-panel@sha256:<digest> \
+  --certificate-identity-regexp '^https://github\.com/Sudoo-sh/sudoo\.sh/\.github/workflows/images\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Images of `main` (`edge`) are signed the same way, with `@refs/heads/main` in the identity. When `cosign` is
+installed on the server, the installer runs this check itself before it uses an image and stops if it fails.
+
+The SBOM and the provenance are attached to the images: `docker buildx imagetools inspect --format
+'{{ json .SBOM }}' ghcr.io/sudoo-sh/sudoo-panel:<version>` (or `.Provenance`).
+
+Check the release's `compose.yaml`:
+
+```bash
+cosign verify-blob compose.yaml --bundle compose.yaml.sigstore.json \
+  --certificate-identity https://github.com/Sudoo-sh/sudoo.sh/.github/workflows/release.yml@refs/tags/v<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```

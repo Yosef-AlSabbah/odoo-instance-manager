@@ -37,7 +37,7 @@ body:
         - Lifetime, deletion or backups
         - Accounts, roles, sign-in or audit log
         - Monitoring
-        - Installer or check-server.sh
+        - Installer (sudoo-install.sh)
         - Documentation
         - Other
     validations:
@@ -69,7 +69,7 @@ body:
     id: environment
     attributes:
       label: Server
-      description: Output of `sudo ./check-server.sh`, and the commit of the panel you run (`git rev-parse --short HEAD`).
+      description: Output of `sudo sudoo-install check` and `sudo sudoo-install status` (the version you run).
       render: text
     validations:
       required: true

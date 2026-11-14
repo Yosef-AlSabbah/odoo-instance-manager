@@ -1,5 +1,7 @@
 # The web app of Sudoo.sh: built with Node, served by Caddy (a single small binary).
-FROM node:26-alpine AS build
+# Released as ghcr.io/sudoo-sh/sudoo-web for linux/amd64 and linux/arm64. The build stage runs on the builder's own
+# platform: its output (HTML, CSS, JavaScript) is the same for every architecture.
+FROM --platform=$BUILDPLATFORM node:26-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund

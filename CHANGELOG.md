@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Prebuilt, signed images:** every version tag publishes `ghcr.io/sudoo-sh/sudoo-panel` and
+  `ghcr.io/sudoo-sh/sudoo-web` for linux/amd64 and linux/arm64 (tags `1.2.3`, `1.2`, `1`, `latest`), with an SBOM and
+  provenance attestation, signed with Sigstore (cosign, keyless). The documentation is inside the panel image. The
+  release carries `compose.yaml` with the images pinned by digest, `env.example` and `SHA256SUMS`. Every commit on
+  `main` publishes `edge` and `sha-<commit>` images.
+- **One-file installer:** `curl -fsSL https://github.com/Sudoo-sh/sudoo.sh/releases/latest/download/sudoo-install.sh | sudo bash`.
+  It checks the server first (each problem with its fix), installs Docker and other missing programs only after
+  asking ([y]es / [n]o / [a]ll, `--yes` for scripts), and runs the release's images. It stays on the server as
+  `sudoo-install` with `check`, `update`, `update --rollback`, `update --version edge`, `status` and `uninstall`
+  (`--purge`). An update replaces only `sudoo-panel` and `sudoo-web`; instances and connectors are never touched.
+- **Manual installation** with the release's `compose.yaml` (docs/ADMIN_GUIDE.md), and **from source** with
+  `docker compose build` (README).
 - **Hardened instance containers:** each instance's `odoo` and `db` run with `no-new-privileges`, every Linux
   capability dropped except the few PostgreSQL's entry point needs (Odoo gets none), read-only system files (only
   the data volumes and in-memory `/tmp` are writable; `config/` and the add-ons are mounted read-only), an init
@@ -56,6 +68,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **A new logo,** the same everywhere: Odoo's round "o" followed by a text cursor.
 
 ### Changed
+
+- **Servers no longer build the images or keep the source code.** `get.sh`, `install.sh` and `check-server.sh` are
+  gone; servers installed with them move to the images with `sudoo-install update` (same containers, folders and
+  `.env`; the source files and `/opt/sudoo.sh-kit` are removed afterwards and kept in the backup).
+- `compose.yaml` has health checks for both services; settings in `.env` that the template does not know are kept.
 
 - **The logo follows the theme:** the favicon and the status pages' icon switch to the graphite tile in dark
   mode, and the README shows the dark animated mark there.

@@ -1,0 +1,17 @@
+# The panel image's build context is the repository: send only what the Dockerfile copies.
+.git
+.github
+.venv
+.idea
+.vscode
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.env
+documentation
+web
+tests
+examples
+*.tgz
+*.zip

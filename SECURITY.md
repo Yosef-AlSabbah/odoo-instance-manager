@@ -4,7 +4,8 @@ The panel manages Docker on its server and stores deploy keys and Odoo master pa
 
 ## Supported versions
 
-Only the latest code on the `main` branch receives security fixes. Running `sudo ./install.sh` again updates a server to it.
+Only the latest release receives security fixes. `sudo sudoo-install update` updates a server to it. How the release
+images and files are signed, and how to check them: [docs/SECURITY.md](docs/SECURITY.md#12-releases-and-signatures).
 
 ## Reporting a vulnerability
 
@@ -30,7 +31,7 @@ Please give a reasonable time to fix the problem before you talk about it public
 
 ## Scope
 
-In scope: the panel, its gateway, the installer and checker scripts, and the way they store secrets and run commands.
+In scope: the panel, its gateway, the release images and the installer (`sudoo-install.sh`), and the way they store secrets and run commands.
 
 Out of scope, because they are documented on purpose in [docs/SECURITY.md](docs/SECURITY.md) and the README's *Known Limitations*:
 
